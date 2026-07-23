@@ -35,16 +35,25 @@ to lose completely.
 **Regime detection.** ADX on the execution timeframe (4h by default)
 classifies the market as trending or ranging.
 
-**Strategy selection.**
-- *Trending* (ADX >= threshold): EMA fast/slow crossover confirmed by MACD
-  histogram direction, with a Donchian-channel breakout as a secondary
-  trigger. Both require price to be on the correct side of a long-period EMA
-  (the higher-timeframe trend filter) - the bot never fights the dominant
-  trend.
-- *Ranging* (ADX < threshold): Bollinger Band extreme + RSI confirmation
-  (buy oversold, sell overbought), the classic mean-reversion setup, which
-  is exactly what tends to fail during strong trends - hence gating it on
-  regime.
+**Strategy selection.** Two strategies are available via `strategy.mode` in
+`settings.yaml` (or `--strategy-mode` on the CLI) - see "Strategy comparison"
+below for why `ensemble` is the default and the recommendation.
+
+- `ensemble` (default) routes on regime:
+  - *Trending* (ADX >= threshold): EMA fast/slow crossover confirmed by MACD
+    histogram direction, with a Donchian-channel breakout as a secondary
+    trigger. Both require price to be on the correct side of a long-period EMA
+    (the higher-timeframe trend filter) - the bot never fights the dominant
+    trend.
+  - *Ranging* (ADX < threshold): Bollinger Band extreme + RSI confirmation
+    (buy oversold, sell overbought), the classic mean-reversion setup, which
+    is exactly what tends to fail during strong trends - hence gating it on
+    regime.
+- `mean_reversion_scalp` fades short-term statistical extremes (RSI(2) deep
+  oversold/overbought + a Bollinger Band touch) in any regime, skipping only
+  when ADX shows a violently strong trend against the fade. It trades far
+  more often on a smaller edge per trade - see below for why that didn't
+  translate into either a higher win rate or better returns here.
 
 **Risk management, per trade.**
 - Stop-loss placed at `ATR * atr_stop_multiplier` from entry (volatility-
@@ -74,8 +83,8 @@ code - tune them to your own risk tolerance.
 ```
 config.py        settings.yaml + .env loader
 models.py         Position / ClosedTrade dataclasses
-indicators.py      EMA/SMA/RSI/MACD/ATR/Bollinger/ADX/Donchian (pandas, Wilder smoothing)
-strategies.py       regime detection + trend/mean-reversion/breakout signal logic
+indicators.py      EMA/SMA/RSI (standard + fast)/MACD/ATR/Bollinger/ADX/Donchian (pandas, Wilder smoothing)
+strategies.py       ensemble (regime-routed) + mean_reversion_scalp strategies, selected via build_strategy()
 risk_manager.py     position sizing, stops/targets, trailing stops, circuit breakers
 portfolio.py         equity/positions/drawdown tracking, trade log, state persistence
 exchange.py          ccxt Bitget wrapper: public market data, PaperBroker, LiveBroker
@@ -106,6 +115,7 @@ cp .env.example .env
 ```bash
 python main.py backtest --days 365
 python main.py backtest --days 365 --save-trades trades.jsonl
+python main.py backtest --days 365 --strategy-mode mean_reversion_scalp
 ```
 
 **Paper trade** (default, no API keys required) - runs continuously against
@@ -201,6 +211,61 @@ drawdown number as directionally worse than reality, not better.
 Re-run this periodically (monthly is reasonable) as new data comes in -
 walk-forward validation is not a one-time exercise, and a parameter set
 that was robust six months ago is not guaranteed to still be robust today.
+
+## Strategy comparison: why win rate isn't the target
+
+It's tempting to want a win rate over 50% - it feels like "the system is
+usually right." Two separate experiments on this repo's real Bitget data
+both say the same thing: chasing that number here made the system *less*
+profitable, not more. Profitability is win_rate x avg_win vs (1-win_rate) x
+avg_loss - pushing the first term up is not free if it costs more on the
+other two, and in both experiments below it did.
+
+**Experiment 1 - constrain the existing `ensemble` strategy's search to
+only accept >=50% training win rate**, same walk-forward setup as above:
+
+| | Unconstrained (default) | Win rate >=50% forced |
+|---|---|---|
+| Chained OOS return | **+1.64%** | -8.08% |
+| Sharpe | 0.20 | -0.49 |
+| Profit factor | 1.08 (profitable) | 0.93 (losing) |
+| OOS win rate | 44.9% | 47.9% (missed its own target out-of-sample) |
+
+The constraint pushed the search toward a 1R take-profit (as tight as the
+stop-loss) to win more often. Win rate barely moved out-of-sample - and
+didn't even clear 50% there - while every win got smaller, which was
+strictly worse.
+
+**Experiment 2 - build `mean_reversion_scalp`, a genuinely different
+strategy** (RSI(2) extreme + Bollinger touch, trades in any regime, designed
+to win more often on smaller moves) and walk-forward optimize it with the
+same >=50%-win-rate constraint active:
+
+| | `mean_reversion_scalp`, walk-forward |
+|---|---|
+| Chained OOS return | -2.83% |
+| Sharpe | -0.06 |
+| Profit factor | 1.03 |
+| OOS win rate | 43.8% |
+
+Every one of the 54 grid combinations tested, on every fold, failed to hit
+50% win rate on its own training data - the search fell back to
+`settings.yaml` defaults every time (reported in the CLI output, not
+hidden). A single full-history backtest at those defaults (`main.py
+backtest --strategy-mode mean_reversion_scalp --days 700`) came out to
+-12.30%, worse still.
+
+**Conclusion, stated plainly:** across two independently-designed
+approaches, nothing tested clears 50% win rate on this data without
+becoming unprofitable or staying unprofitable. `settings.yaml` stays on
+`ensemble` with its unconstrained, walk-forward-validated parameters
+(+1.64% chained OOS return, Sharpe 0.20, profit factor 1.08) because it is
+the only configuration in this whole exercise that is both validated
+out-of-sample and actually makes money. `mean_reversion_scalp` ships as a
+selectable, tested, honestly-documented option for further experimentation
+- e.g. a lower `MIN_WIN_RATE_PCT` in `optimize.py`, additional indicator
+filters, or blending it with `ensemble` as a second sleeve - but it is not
+currently recommended over the default.
 
 ## Uploaded reference files
 

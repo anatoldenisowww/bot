@@ -38,7 +38,11 @@ from config import Config
 PARAM_GRID: Dict[str, List[float]] = {
     "adx_trend_threshold": [20, 25, 30],
     "atr_stop_multiplier": [1.5, 2.0, 2.5],
-    "take_profit_r_multiple": [1.5, 2.0, 2.5, 3.0],
+    # Smaller multiples pull the take-profit closer to the stop distance,
+    # which is what raises win rate - a trade needs less favorable movement
+    # to be called a win. Kept wide enough (down to 1.0R) to actually find
+    # >=50%-win-rate configurations, not just approach the constraint.
+    "take_profit_r_multiple": [1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
 }
 
 # risk_per_trade_pct / leverage are intentionally NOT searched. Cranking up
@@ -48,6 +52,16 @@ PARAM_GRID: Dict[str, List[float]] = {
 
 MIN_TRADES_FOR_VALID_FOLD = 8
 MAX_ACCEPTABLE_TRAIN_DRAWDOWN_PCT = 25.0
+# User-requested constraint: only consider parameter sets whose TRAINING
+# win rate clears this bar. This is a real constraint on the search, applied
+# the same honest way as the other guardrails - never picked by looking at
+# the test result. Note the tradeoff this forces: at a fixed stop distance,
+# raising win rate means pulling the take-profit target closer in (see
+# take_profit_r_multiple above), which shrinks the average winner. A higher
+# win rate does not automatically mean a more profitable system - the
+# per-fold and chained OOS profit factor / total return below are what
+# actually say whether this constraint helped or hurt.
+MIN_WIN_RATE_PCT = 50.0
 
 
 @dataclass
@@ -60,6 +74,7 @@ class FoldResult:
     best_params: Dict[str, float]
     train_stats: BacktestStats
     test_result: BacktestResult
+    guardrails_cleared: bool  # False -> no grid combo hit the guardrails on this fold's training window; fell back to settings.yaml defaults
 
 
 @dataclass
@@ -89,11 +104,16 @@ def _objective(stats: BacktestStats) -> float:
     Raw return is not used as the objective on purpose - it's what a
     single lucky trade optimizes for. Sharpe with a trade-count floor and a
     drawdown ceiling rewards a parameter set that traded enough to mean
-    something and didn't get there by taking reckless risk.
+    something and didn't get there by taking reckless risk. win_rate is a
+    hard constraint, not part of the score, so among everything that clears
+    50% the search still picks the best risk-adjusted candidate rather than
+    just the highest win rate.
     """
     if stats.total_trades < MIN_TRADES_FOR_VALID_FOLD:
         return float("-inf")
     if stats.max_drawdown_pct > MAX_ACCEPTABLE_TRAIN_DRAWDOWN_PCT:
+        return float("-inf")
+    if stats.win_rate < MIN_WIN_RATE_PCT:
         return float("-inf")
     return stats.sharpe_ratio
 
@@ -143,9 +163,13 @@ def walk_forward_optimize(
                 best_params = params
                 best_train_stats = result.stats
 
-        if best_params is None:
-            # nothing in the grid cleared the guardrails on this window -
-            # fall back to the settings.yaml defaults rather than force a pick.
+        guardrails_cleared = best_params is not None
+        if not guardrails_cleared:
+            # nothing in the grid cleared the guardrails on this window (with
+            # MIN_WIN_RATE_PCT active, this can happen a lot - a strategy that
+            # cuts losers quickly and lets winners run structurally tends
+            # toward <50% win rate) - fall back to settings.yaml defaults
+            # rather than force a pick, and say so plainly in the report.
             best_params = {
                 "adx_trend_threshold": cfg.indicators.adx_trend_threshold,
                 "atr_stop_multiplier": cfg.risk.atr_stop_multiplier,
@@ -165,6 +189,7 @@ def walk_forward_optimize(
             best_params=best_params,
             train_stats=best_train_stats,
             test_result=test_result,
+            guardrails_cleared=guardrails_cleared,
         ))
 
         fold_index += 1

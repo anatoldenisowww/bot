@@ -59,5 +59,5 @@ def test_add_all_indicators_has_expected_columns():
     cfg = load_config()
     df = _make_df()
     out = indicators.add_all_indicators(df, cfg.indicators)
-    for col in ["ema_fast", "ema_slow", "ema_trend", "rsi", "atr", "bb_upper", "bb_lower", "adx", "donchian_upper", "macd_hist"]:
+    for col in ["ema_fast", "ema_slow", "ema_trend", "rsi", "rsi_fast", "atr", "bb_upper", "bb_lower", "adx", "donchian_upper", "macd_hist"]:
         assert col in out.columns

@@ -19,7 +19,7 @@ from bot import QuantTradingBot
 from config import Config, load_config
 from exchange import MarketDataFeed
 from logging_setup import setup_logging
-from optimize import most_common_params, walk_forward_optimize
+from optimize import MIN_WIN_RATE_PCT, most_common_params, walk_forward_optimize
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,8 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 
     if args.timeframe:
         cfg.exchange.timeframe = args.timeframe
+    if args.strategy_mode:
+        cfg.strategy.mode = args.strategy_mode
 
     feed = MarketDataFeed(cfg)
     price_data = _fetch_price_data(cfg, feed, args.days)
@@ -57,6 +59,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     print("\n=== Backtest results ===")
     print(tabulate(
         [
+            ["Strategy", cfg.strategy.mode],
             ["Symbols", ", ".join(price_data.keys())],
             ["Period", f"{args.days} days"],
             ["Starting equity", f"${cfg.risk.starting_equity:,.2f}"],
@@ -96,6 +99,8 @@ def cmd_optimize(args: argparse.Namespace) -> None:
 
     if args.timeframe:
         cfg.exchange.timeframe = args.timeframe
+    if args.strategy_mode:
+        cfg.strategy.mode = args.strategy_mode
 
     feed = MarketDataFeed(cfg)
     price_data = _fetch_price_data(cfg, feed, args.days)
@@ -104,6 +109,7 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     print(
+        f"Strategy: {cfg.strategy.mode}\n"
         f"Running walk-forward optimization: {args.train_days}d train / {args.test_days}d test "
         f"windows, stepping {args.step_days or args.test_days}d, over {args.days}d of {cfg.exchange.timeframe} "
         f"history. Every fold's parameters are chosen only from data before that fold's test window.\n"
@@ -119,10 +125,12 @@ def cmd_optimize(args: argparse.Namespace) -> None:
             f.fold_index,
             f.test_start.strftime("%Y-%m-%d"),
             f.test_end.strftime("%Y-%m-%d"),
-            f"adx>={f.best_params['adx_trend_threshold']:.0f} atr_x{f.best_params['atr_stop_multiplier']:.1f} tp{f.best_params['take_profit_r_multiple']:.1f}R",
+            f"adx>={f.best_params['adx_trend_threshold']:.0f} atr_x{f.best_params['atr_stop_multiplier']:.1f} tp{f.best_params['take_profit_r_multiple']:.1f}R" + ("" if f.guardrails_cleared else " (fallback*)"),
+            f"{f.train_stats.win_rate:.0f}%",
             f.train_stats.total_trades,
             f"{f.train_stats.sharpe_ratio:.2f}",
             f.test_result.stats.total_trades,
+            f"{f.test_result.stats.win_rate:.0f}%",
             f"{f.test_result.stats.total_return_pct:+.2f}%",
             f"{f.test_result.stats.sharpe_ratio:.2f}",
         ])
@@ -130,9 +138,18 @@ def cmd_optimize(args: argparse.Namespace) -> None:
     print("=== Per-fold results (train chooses params, test is genuinely out-of-sample) ===")
     print(tabulate(
         rows,
-        headers=["fold", "OOS start", "OOS end", "chosen params", "train trades", "train sharpe", "OOS trades", "OOS return", "OOS sharpe"],
+        headers=["fold", "OOS start", "OOS end", "chosen params", "train WR", "train trades", "train sharpe", "OOS trades", "OOS WR", "OOS return", "OOS sharpe"],
         tablefmt="simple",
     ))
+
+    fallback_folds = [f.fold_index for f in result.folds if not f.guardrails_cleared]
+    if fallback_folds:
+        print(
+            f"\n* fold(s) {fallback_folds}: no combination in the parameter grid hit "
+            f"{MIN_WIN_RATE_PCT:.0f}%+ training win rate together with the drawdown/trade-count "
+            "guardrails, so that fold fell back to settings.yaml's existing defaults instead of "
+            "forcing a pick. This is being reported, not hidden."
+        )
 
     s = result.chained_stats
     print("\n=== Chained out-of-sample performance (the honest headline number) ===")
@@ -226,15 +243,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bitget quant trading bot for BTC/ETH/SOL")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    strategy_choices = ["ensemble", "mean_reversion_scalp"]
+
     bt = sub.add_parser("backtest", help="backtest the strategy against historical Bitget data")
     bt.add_argument("--days", type=int, default=365, help="how many days of history to fetch")
     bt.add_argument("--timeframe", type=str, default=None, help="override the execution timeframe from settings.yaml, e.g. 1h")
+    bt.add_argument("--strategy-mode", choices=strategy_choices, default=None, help="override strategy.mode from settings.yaml")
     bt.add_argument("--save-trades", type=str, default=None, help="optional path to save closed trades as JSONL")
     bt.set_defaults(func=cmd_backtest)
 
     opt = sub.add_parser("optimize", help="walk-forward parameter search - train on rolling windows, validate strictly out-of-sample")
     opt.add_argument("--days", type=int, default=700, help="total days of history to fetch")
     opt.add_argument("--timeframe", type=str, default=None, help="override the execution timeframe from settings.yaml")
+    opt.add_argument("--strategy-mode", choices=strategy_choices, default=None, help="override strategy.mode from settings.yaml")
     opt.add_argument("--train-days", type=int, default=300, help="length of each training window")
     opt.add_argument("--test-days", type=int, default=100, help="length of each out-of-sample test window")
     opt.add_argument("--step-days", type=int, default=None, help="how far to roll forward between folds (defaults to --test-days)")

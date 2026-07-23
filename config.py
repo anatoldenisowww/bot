@@ -40,6 +40,14 @@ class IndicatorConfig:
     adx_period: int
     adx_trend_threshold: float
     donchian_period: int
+    rsi_fast_period: int
+    rsi_fast_oversold: float
+    rsi_fast_overbought: float
+
+
+@dataclass
+class StrategyConfig:
+    mode: str  # "ensemble" (regime-routed trend/breakout/mean-reversion) | "mean_reversion_scalp"
 
 
 @dataclass
@@ -76,6 +84,7 @@ class Secrets:
 class Config:
     exchange: ExchangeConfig
     indicators: IndicatorConfig
+    strategy: StrategyConfig
     risk: RiskConfig
     runtime: RuntimeConfig
     secrets: Secrets = field(default_factory=Secrets)
@@ -89,6 +98,7 @@ def load_config(settings_path: str | Path = ROOT / "settings.yaml", env_path: st
 
     exchange = ExchangeConfig(**raw["exchange"])
     indicators = IndicatorConfig(**raw["indicators"])
+    strategy = StrategyConfig(**raw["strategy"])
     risk = RiskConfig(**raw["risk"])
     runtime = RuntimeConfig(**raw["runtime"])
 
@@ -99,4 +109,4 @@ def load_config(settings_path: str | Path = ROOT / "settings.yaml", env_path: st
         live_trading_enabled=os.getenv("LIVE_TRADING_ENABLED", "false").strip().lower() == "true",
     )
 
-    return Config(exchange=exchange, indicators=indicators, risk=risk, runtime=runtime, secrets=secrets)
+    return Config(exchange=exchange, indicators=indicators, strategy=strategy, risk=risk, runtime=runtime, secrets=secrets)

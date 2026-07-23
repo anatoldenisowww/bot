@@ -30,6 +30,12 @@ indicators:
   adx_period: 14
   adx_trend_threshold: 20     # ADX above this = trending regime - set by walk-forward optimization, see README
   donchian_period: 20
+  rsi_fast_period: 2          # short-window RSI used by the mean_reversion_scalp strategy
+  rsi_fast_oversold: 10
+  rsi_fast_overbought: 90
+
+strategy:
+  mode: ensemble               # "ensemble" (trend/breakout + regime-gated mean-reversion) | "mean_reversion_scalp"
 
 risk:
   starting_equity: 10000.0    # only used by paper broker / backtester

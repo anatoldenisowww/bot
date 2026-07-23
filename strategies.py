@@ -123,3 +123,65 @@ class EnsembleStrategy:
         if range_sig:
             return range_sig
         return Signal("FLAT", 0.0, "range", ["ranging regime, no extreme reached"])
+
+
+class MeanReversionScalpStrategy:
+    """Fades short-term statistical extremes: a very short RSI (period 2 by
+    default) at a deep oversold/overbought reading, confirmed by the price
+    also touching the Bollinger Band. Structurally different from
+    EnsembleStrategy - it trades in any regime, far more often, on a
+    smaller edge per trade. That combination tends toward a higher win rate
+    (frequent small reversions) at the cost of a lower average win, which is
+    exactly the tradeoff the walk-forward optimizer showed hurts profitability
+    when forced onto the trend-following ensemble. Whether it's actually more
+    profitable *as a strategy in its own right* is an empirical question -
+    validate with `main.py optimize`, don't assume.
+
+    The one safety filter kept: don't fade a violently strong trend (ADX very
+    high, price already on the trend side of the long EMA) - that's the
+    classic way mean-reversion systems take a catastrophic loss, buying every
+    dip on the way to zero.
+    """
+
+    STRONG_TREND_ADX = 40.0
+
+    def __init__(self, indicator_cfg):
+        self.cfg = indicator_cfg
+
+    def generate_signal(self, df: pd.DataFrame) -> Signal:
+        min_len = max(self.cfg.bb_period, self.cfg.rsi_fast_period, self.cfg.atr_period, self.cfg.adx_period) + 5
+        if len(df) < min_len:
+            return Signal("FLAT", 0.0, "insufficient_data", ["not enough candles for stable indicators"])
+
+        row = df.iloc[-1]
+        if pd.isna(row[["rsi_fast", "bb_upper", "bb_lower", "atr", "adx"]]).any():
+            return Signal("FLAT", 0.0, "warming_up", ["indicators still warming up"])
+
+        violent_trend = row["adx"] >= self.STRONG_TREND_ADX
+        bias = _trend_bias(row)
+
+        if row["close"] <= row["bb_lower"] and row["rsi_fast"] <= self.cfg.rsi_fast_oversold:
+            if violent_trend and bias == "SHORT":
+                return Signal("FLAT", 0.0, "mr_scalp", ["skipped: would be fading a violently strong downtrend"])
+            return Signal(
+                "LONG", 0.6, "mr_scalp",
+                [f"RSI({self.cfg.rsi_fast_period}) {row['rsi_fast']:.1f} extreme oversold", "price at/below lower Bollinger band"],
+            )
+
+        if row["close"] >= row["bb_upper"] and row["rsi_fast"] >= self.cfg.rsi_fast_overbought:
+            if violent_trend and bias == "LONG":
+                return Signal("FLAT", 0.0, "mr_scalp", ["skipped: would be fading a violently strong uptrend"])
+            return Signal(
+                "SHORT", 0.6, "mr_scalp",
+                [f"RSI({self.cfg.rsi_fast_period}) {row['rsi_fast']:.1f} extreme overbought", "price at/above upper Bollinger band"],
+            )
+
+        return Signal("FLAT", 0.0, "mr_scalp")
+
+
+def build_strategy(mode: str, indicator_cfg):
+    if mode == "ensemble":
+        return EnsembleStrategy(indicator_cfg)
+    if mode == "mean_reversion_scalp":
+        return MeanReversionScalpStrategy(indicator_cfg)
+    raise ValueError(f"unknown strategy mode: {mode!r}")

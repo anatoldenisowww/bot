@@ -101,6 +101,7 @@ def add_all_indicators(df: pd.DataFrame, cfg) -> pd.DataFrame:
     out["ema_slow"] = ema(out["close"], cfg.ema_slow)
     out["ema_trend"] = ema(out["close"], cfg.ema_trend_filter)
     out["rsi"] = rsi(out["close"], cfg.rsi_period)
+    out["rsi_fast"] = rsi(out["close"], cfg.rsi_fast_period)
     out["atr"] = atr(out, cfg.atr_period)
 
     bb = bollinger_bands(out["close"], cfg.bb_period, cfg.bb_std)

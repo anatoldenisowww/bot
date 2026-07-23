@@ -21,7 +21,7 @@ from exchange import LiveBroker, MarketDataFeed, PaperBroker
 from models import Position, utcnow
 from portfolio import PortfolioManager
 from risk_manager import RiskManager
-from strategies import EnsembleStrategy
+from strategies import build_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class QuantTradingBot:
         self.mode = mode
         self.market_data = MarketDataFeed(cfg)
         self.broker = LiveBroker(cfg, self.market_data) if mode == "live" else PaperBroker(cfg, self.market_data)
-        self.strategy = EnsembleStrategy(cfg.indicators)
+        self.strategy = build_strategy(cfg.strategy.mode, cfg.indicators)
         self.risk = RiskManager(cfg.risk)
 
         state_dir = Path(cfg.runtime.state_dir) / mode

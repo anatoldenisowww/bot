@@ -1,6 +1,7 @@
 """Event-driven backtest: replays historical candles bar-by-bar across the
-whole symbol universe, using the exact same RiskManager/EnsembleStrategy
-classes the live bot uses. Fees and slippage are charged on every fill.
+whole symbol universe, using the exact same RiskManager and strategy
+(selected via cfg.strategy.mode, see strategies.build_strategy) the live bot
+uses. Fees and slippage are charged on every fill.
 
 Simplifying assumption: symbols are iterated by row position, not merged on
 timestamp. This holds as long as all OHLCV series were fetched with the same
@@ -19,7 +20,7 @@ from config import Config
 from models import ClosedTrade, Position, utcnow
 from portfolio import PortfolioManager
 from risk_manager import RiskManager
-from strategies import EnsembleStrategy, Signal
+from strategies import Signal, build_strategy
 
 
 @dataclass
@@ -94,7 +95,7 @@ def simulate(cfg: Config, dfs: Dict[str, pd.DataFrame], start_index: int, end_in
     move the window, without recomputing indicators per fold or per candidate
     parameter set.
     """
-    strategy = EnsembleStrategy(cfg.indicators)
+    strategy = build_strategy(cfg.strategy.mode, cfg.indicators)
     risk = RiskManager(cfg.risk)
     portfolio = PortfolioManager(starting_equity=cfg.risk.starting_equity)
 
