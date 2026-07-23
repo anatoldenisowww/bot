@@ -1,0 +1,50 @@
+# Default strategy / risk configuration.
+# Every value here can be overridden by editing this file directly -
+# nothing sensitive lives here, only strategy and risk parameters.
+
+exchange:
+  id: bitget
+  market_type: swap          # USDT-M perpetual futures
+  quote: USDT
+  symbols:
+    - BTC/USDT:USDT
+    - ETH/USDT:USDT
+    - SOL/USDT:USDT
+  timeframe: 4h               # execution timeframe
+  trend_timeframe: 1d         # higher timeframe trend filter
+  leverage: 3                 # conservative default, isolated margin
+  margin_mode: isolated
+  taker_fee_bps: 6            # 0.06% - Bitget USDT-M taker fee
+  slippage_bps: 5             # assumed slippage on market fills
+
+indicators:
+  ema_fast: 20
+  ema_slow: 50
+  ema_trend_filter: 200
+  rsi_period: 14
+  rsi_oversold: 35
+  rsi_overbought: 65
+  bb_period: 20
+  bb_std: 2.0
+  atr_period: 14
+  adx_period: 14
+  adx_trend_threshold: 25     # ADX above this = trending regime
+  donchian_period: 20
+
+risk:
+  starting_equity: 10000.0    # only used by paper broker / backtester
+  risk_per_trade_pct: 1.0     # % of equity risked per trade (stop distance)
+  max_leverage: 5
+  atr_stop_multiplier: 2.0    # stop = entry -/+ atr_stop_multiplier * ATR
+  take_profit_r_multiple: 2.5 # take profit at this multiple of initial risk (R)
+  trailing_activation_r: 1.0  # start trailing once trade is up this many R
+  trailing_atr_multiplier: 1.5
+  max_concurrent_positions: 3
+  max_portfolio_risk_pct: 3.0 # sum of open-trade risk, as % of equity
+  max_daily_loss_pct: 3.0     # halt new trades for the day past this loss
+  max_drawdown_pct: 15.0      # halt bot entirely past this drawdown from peak equity
+
+runtime:
+  poll_interval_seconds: 60
+  state_dir: state
+  log_dir: logs
