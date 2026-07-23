@@ -196,6 +196,7 @@ def walk_forward_optimize(
     step_days = step_days or test_days
 
     dfs = {sym: indicators.add_all_indicators(df, cfg.indicators) for sym, df in price_data.items()}
+    dfs = backtester.align_on_common_timestamps(dfs)
     min_len = min(len(df) for df in dfs.values())
     warmup = backtester.warmup_bars(cfg)
     timeline = dfs[next(iter(dfs))]["timestamp"]

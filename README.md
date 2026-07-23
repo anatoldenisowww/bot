@@ -239,6 +239,16 @@ earlier experiment on `ensemble` drove its OOS return from +1.64% to -8.08%
 by doing exactly that. The `--min-win-rate` flag on `optimize` still lets
 you explore that tradeoff, but it defaults to off for this reason.
 
+**On timeframe (a 1h backtest lesson):** the default parameters are tuned for
+the 4h timeframe. A 700-day backtest on **1h** candles at those same params
+returned -15.23% (profit factor 0.41) - much worse, and not because the code
+is broken but because `momentum_lookback_bars: 20` means ~3.3 days on 4h but
+only 20 hours on 1h, and ultra-short-horizon "momentum" in crypto tends to
+mean-revert rather than continue. The edge inverts. **Parameters do not
+transfer across timeframes** - if you want to run 1h, re-run `optimize
+--timeframe 1h` first (it would pick a much longer lookback). This is a
+general rule, not a quirk of this bot.
+
 **The multiple-comparisons caveat:** ~100+ parameter combinations were tried
 across these strategies. Walk-forward guards against overfitting a single
 window, but trying many things and reporting the best still bakes in some

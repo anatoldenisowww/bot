@@ -70,6 +70,36 @@ def warmup_bars(cfg: Config) -> int:
     return max(cfg.indicators.ema_trend_filter, cfg.indicators.adx_period, cfg.indicators.bb_period) + 5
 
 
+def align_on_common_timestamps(dfs: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+    """Restrict every symbol's DataFrame to the timestamps ALL symbols share,
+    so a shared positional index `i` means the same calendar bar for every
+    symbol.
+
+    The event loop indexes each symbol by row position (dfs[sym].iloc[i]).
+    That's only valid if position i is the same date across symbols. When
+    every series has full, identical history (e.g. BTC/ETH/SOL fetched from
+    the same `since`) that already holds and this is a no-op. But the
+    cross-sectional strategy ranks symbols against each other at the same i,
+    and a newer coin with a shorter history would otherwise have its bar i sit
+    at a different date than BTC's bar i - silently comparing mismatched
+    dates. Inner-joining on timestamp fixes that; indicators are computed
+    BEFORE this trim so each symbol's lookback windows stay intact.
+    """
+    if len(dfs) <= 1:
+        return dfs
+    common = None
+    for df in dfs.values():
+        ts = set(df["timestamp"])
+        common = ts if common is None else (common & ts)
+    if not common:
+        raise ValueError("symbols share no common timestamps - cannot align them for a joint backtest")
+    aligned = {}
+    for sym, df in dfs.items():
+        trimmed = df[df["timestamp"].isin(common)].sort_values("timestamp").reset_index(drop=True)
+        aligned[sym] = trimmed
+    return aligned
+
+
 def run_backtest(
     cfg: Config, price_data: Dict[str, pd.DataFrame], market_limits: Optional[Dict[str, MarketLimits]] = None,
 ) -> BacktestResult:
@@ -77,11 +107,13 @@ def run_backtest(
 
     For repeated backtests over the same price history with different risk/
     regime parameters (e.g. walk-forward optimization), prefer computing the
-    indicator DataFrames once with `indicators.add_all_indicators` and calling
-    `simulate()` directly - it's the same event loop without redundant
-    indicator recomputation, which dominates the cost of a grid search.
+    indicator DataFrames once with `indicators.add_all_indicators`, aligning
+    them with `align_on_common_timestamps`, and calling `simulate()` directly
+    - it's the same event loop without redundant indicator recomputation,
+    which dominates the cost of a grid search.
     """
     dfs = {sym: indicators.add_all_indicators(df, cfg.indicators) for sym, df in price_data.items()}
+    dfs = align_on_common_timestamps(dfs)
     min_len = min(len(df) for df in dfs.values())
     warmup = warmup_bars(cfg)
     if min_len <= warmup:
