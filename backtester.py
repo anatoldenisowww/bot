@@ -10,13 +10,14 @@ timeframe and the same `since`, which `main.py backtest` always does.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 import indicators
 from config import Config
+from exchange import MarketLimits, clamp_qty_to_market
 from models import ClosedTrade, Position, utcnow
 from portfolio import PortfolioManager
 from risk_manager import RiskManager
@@ -69,7 +70,9 @@ def warmup_bars(cfg: Config) -> int:
     return max(cfg.indicators.ema_trend_filter, cfg.indicators.adx_period, cfg.indicators.bb_period) + 5
 
 
-def run_backtest(cfg: Config, price_data: Dict[str, pd.DataFrame]) -> BacktestResult:
+def run_backtest(
+    cfg: Config, price_data: Dict[str, pd.DataFrame], market_limits: Optional[Dict[str, MarketLimits]] = None,
+) -> BacktestResult:
     """Compute indicators fresh and backtest the full available range.
 
     For repeated backtests over the same price history with different risk/
@@ -83,10 +86,13 @@ def run_backtest(cfg: Config, price_data: Dict[str, pd.DataFrame]) -> BacktestRe
     warmup = warmup_bars(cfg)
     if min_len <= warmup:
         raise ValueError(f"not enough candles ({min_len}) to warm up indicators (need > {warmup})")
-    return simulate(cfg, dfs, warmup, min_len)
+    return simulate(cfg, dfs, warmup, min_len, market_limits=market_limits)
 
 
-def simulate(cfg: Config, dfs: Dict[str, pd.DataFrame], start_index: int, end_index: int) -> BacktestResult:
+def simulate(
+    cfg: Config, dfs: Dict[str, pd.DataFrame], start_index: int, end_index: int,
+    market_limits: Optional[Dict[str, MarketLimits]] = None,
+) -> BacktestResult:
     """Core event loop over precomputed indicator DataFrames, trading only
     bars in [start_index, end_index). Bars before start_index are still
     visible to the strategy (needed for indicator lookback / regime context)
@@ -94,8 +100,15 @@ def simulate(cfg: Config, dfs: Dict[str, pd.DataFrame], start_index: int, end_in
     optimizer hand in the same full-history DataFrame for every fold and just
     move the window, without recomputing indicators per fold or per candidate
     parameter set.
+
+    market_limits, when provided, rounds every entry's computed quantity down
+    to what the exchange would actually accept and skips the trade if it
+    can't clear the exchange's minimum order size - the honest thing to do
+    for a small account, where a 1% risk trade on a volatile pick can size
+    out below Bitget's $5 minimum notional. Omit it (as tests do) to size
+    purely off the risk model, uncapped by exchange mechanics.
     """
-    strategy = build_strategy(cfg.strategy.mode, cfg.indicators)
+    strategy = build_strategy(cfg)
     risk = RiskManager(cfg.risk)
     portfolio = PortfolioManager(starting_equity=cfg.risk.starting_equity)
 
@@ -110,7 +123,11 @@ def simulate(cfg: Config, dfs: Dict[str, pd.DataFrame], start_index: int, end_in
         portfolio.advance_clock(ts.to_pydatetime())
         current_prices = {sym: dfs[sym].iloc[i]["close"] for sym in dfs}
 
-        # 1. manage existing positions: stop/take-profit, then trailing stop.
+        signals = strategy.generate_signals(dfs, i)
+
+        # 1. manage existing positions: stop/take-profit, trailing stop, then
+        #    the strategy's own signal-based exit policy (e.g. dropped out of
+        #    the top/bottom-K bucket, or flipped to the opposite side).
         for sym in list(portfolio.open_positions.keys()):
             bar = dfs[sym].iloc[i]
             position = portfolio.open_positions[sym]
@@ -119,6 +136,14 @@ def simulate(cfg: Config, dfs: Dict[str, pd.DataFrame], start_index: int, end_in
                 fee = exit_price * position.qty * fee_rate
                 portfolio.close_position(sym, exit_price, fee, reason, closed_at=ts.to_pydatetime())
                 continue
+
+            signal = signals.get(sym)
+            if signal is not None and strategy.should_exit_on_signal(position.side, signal):
+                exit_price = bar["close"] * (1 - slip) if position.side == "LONG" else bar["close"] * (1 + slip)
+                fee = exit_price * position.qty * fee_rate
+                portfolio.close_position(sym, exit_price, fee, "signal_exit", closed_at=ts.to_pydatetime())
+                continue
+
             new_stop = risk.update_trailing_stop(position, bar["close"], bar["atr"])
             if new_stop is not None:
                 position.stop_price = new_stop
@@ -130,8 +155,7 @@ def simulate(cfg: Config, dfs: Dict[str, pd.DataFrame], start_index: int, end_in
         for sym, df in dfs.items():
             if sym in portfolio.open_positions:
                 continue
-            window = df.iloc[: i + 1]
-            signal: Signal = strategy.generate_signal(window)
+            signal: Signal = signals.get(sym)
             if not signal:
                 continue
 
@@ -142,6 +166,11 @@ def simulate(cfg: Config, dfs: Dict[str, pd.DataFrame], start_index: int, end_in
             qty = risk.position_size(portfolio.equity, fill_price, stop)
             if qty <= 0:
                 continue
+
+            if market_limits is not None and sym in market_limits:
+                qty = clamp_qty_to_market(qty, fill_price, market_limits[sym])
+                if qty <= 0:
+                    continue
 
             proposed_risk = abs(fill_price - stop) * qty
             decision = risk.can_open_new_trade(

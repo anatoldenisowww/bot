@@ -1,59 +1,69 @@
-# Bitget Quant Trading Bot - BTC / ETH / SOL
+# Bitget Quant Trading Bot - multi-asset crypto perpetuals
 
-A regime-aware quant trading bot for Bitget USDT-M perpetual futures, built
-around one idea a professional desk would insist on: **the risk manager
-matters more than the entry signal.** Position sizing, stop-losses and
-circuit breakers are not optional add-ons here - they're the core of the
-system, and every trade goes through them before it's allowed to happen.
+A quant trading bot for Bitget USDT-M perpetual futures, built around one
+idea a professional desk would insist on: **the risk manager matters more
+than the entry signal.** Position sizing, stop-losses and circuit breakers
+are the core of the system - every trade goes through them before it's
+allowed to happen - and it's sized to run on a small account (a few hundred
+euros) that you top up over time.
 
-## Read this first
+## Read this first - the honest headline
 
-No trading strategy - here or anywhere - is "guaranteed profitable." Anyone
-who tells you otherwise is selling something. Crypto futures are volatile
-and leveraged; you can lose your entire deposit, faster than in spot
-markets. What this bot *does* give you:
+**No strategy here is a money printer, and the backtests say so plainly.**
+Three separate, seriously-built strategies were each walk-forward validated
+on real Bitget data (the honest way: parameters chosen only on past data,
+scored only on unseen future data). Every one of them lands between
+break-even and slightly positive **net of realistic fees and slippage**.
+That is the truthful result of this exercise, and it's far more valuable
+than a fake-impressive number that would evaporate live.
 
-- A real, working strategy with a documented edge hypothesis (trend +
-  mean-reversion regime switching), not a black box.
-- Disciplined risk management: every position is sized so a stop-out costs a
-  fixed, small percentage of equity, with portfolio-wide risk caps and
-  daily-loss / max-drawdown circuit breakers that halt trading automatically.
-- A backtester so you can see how the strategy would have performed on real
-  historical Bitget data before risking a cent.
-- A paper-trading mode (the default) that runs against live market data with
-  simulated fills, so you can watch it operate with zero financial risk.
-- A live-trading mode that is off by default and requires two explicit,
-  separate confirmations to enable.
+What that means concretely: the current default (`cross_sectional_momentum`)
+showed a **real gross edge** (profit factor 1.07 - winners exceed losers)
+with the best risk profile of anything built here (10.4% max drawdown across
+10 diversified symbols), but trading costs ate the edge down to roughly
+break-even (-0.34% over ~400 out-of-sample days). See "Strategy comparison
+and honest results" below for the full numbers on all three.
 
-Start in `backtest`, move to `paper`, and only consider `live` after you've
-watched it operate for a meaningful stretch of time and you understand
-exactly what it will do with your money. Start with an amount you can afford
-to lose completely.
+**So why run it at all?** Because what you have is a professionally
+structured, properly risk-managed, diversified system with disciplined
+execution and a small real edge - the correct *foundation* to iterate on -
+rather than a curve-fit fantasy. The honest path to net-profitable from here
+is reducing trading costs (maker-only orders, a slower timeframe, fewer
+trades), not cranking leverage. Treat live trading as an experiment with
+money you can afford to lose entirely, starting small.
+
+**Workflow: `backtest` -> `optimize` -> `paper` (for weeks) -> `live` small.**
+Never skip paper trading.
 
 ## How it works
 
-**Regime detection.** ADX on the execution timeframe (4h by default)
-classifies the market as trending or ranging.
+**Strategy selection.** Choose via `strategy.mode` in `settings.yaml` (or
+`--strategy-mode` on the CLI):
 
-**Strategy selection.** Two strategies are available via `strategy.mode` in
-`settings.yaml` (or `--strategy-mode` on the CLI) - see "Strategy comparison"
-below for why `ensemble` is the default and the recommendation.
+- `cross_sectional_momentum` (**default**) - the rebuild for a broad
+  universe. Each bar it ranks the most liquid ~15 Bitget USDT-M perpetuals
+  (dynamically selected, see `universe.py`) by **risk-adjusted momentum**:
+  `(price_now - price_N_bars_ago) / (ATR x sqrt(N))`. It goes long the
+  `top_k` strongest and short the `bottom_k` weakest, and exits a name as
+  soon as it drops out of that bucket. Normalizing by ATR is what makes a
+  volatile micro-cap and a calm major comparable - ranking on raw return
+  alone would just always pick the most volatile coin. This is the
+  diversified, cross-sectional approach real systematic desks actually use,
+  rather than one signal on one asset.
+- `ensemble` - regime-routed single-symbol strategy on a fixed list:
+  - *Trending* (ADX >= threshold): EMA crossover + MACD confirmation, plus a
+    Donchian breakout, always on the correct side of a long-period EMA.
+  - *Ranging* (ADX < threshold): Bollinger-band + RSI mean reversion.
+- `mean_reversion_scalp` - fades short-term RSI(2)/Bollinger extremes in any
+  regime, skipping only violently strong trends. Trades often on a thin edge.
 
-- `ensemble` (default) routes on regime:
-  - *Trending* (ADX >= threshold): EMA fast/slow crossover confirmed by MACD
-    histogram direction, with a Donchian-channel breakout as a secondary
-    trigger. Both require price to be on the correct side of a long-period EMA
-    (the higher-timeframe trend filter) - the bot never fights the dominant
-    trend.
-  - *Ranging* (ADX < threshold): Bollinger Band extreme + RSI confirmation
-    (buy oversold, sell overbought), the classic mean-reversion setup, which
-    is exactly what tends to fail during strong trends - hence gating it on
-    regime.
-- `mean_reversion_scalp` fades short-term statistical extremes (RSI(2) deep
-  oversold/overbought + a Bollinger Band touch) in any regime, skipping only
-  when ADX shows a violently strong trend against the fade. It trades far
-  more often on a smaller edge per trade - see below for why that didn't
-  translate into either a higher win rate or better returns here.
+**Dynamic universe (cross_sectional_momentum only).** Instead of a fixed
+BTC/ETH/SOL list, the tradable set is the top-N most liquid eligible
+USDT-M perpetuals by 24h quote volume, re-scanned every
+`universe_refresh_hours` in live/paper mode. Tokenized real-world-asset
+perpetuals (gold, tokenized stocks - Bitget lists these alongside crypto
+and tags them `isRwa`) are filtered out; they have gap/corporate-action
+risk this strategy isn't built for.
 
 **Risk management, per trade.**
 - Stop-loss placed at `ATR * atr_stop_multiplier` from entry (volatility-
@@ -66,14 +76,22 @@ below for why `ensemble` is the default and the recommendation.
   default), locking in gains as price moves further favorably.
 
 **Risk management, portfolio-wide.**
-- Max concurrent positions (default 3 - one per symbol).
-- Max total open risk as a % of equity across all positions at once, so BTC/
-  ETH/SOL's high correlation can't stack into an outsized bet.
+- Max concurrent positions (default 6 - matches top_k + bottom_k).
+- Max total open risk as a % of equity across all positions at once.
 - Daily loss circuit breaker: past `max_daily_loss_pct` (3% default), no new
   trades until the next UTC day.
 - Max drawdown circuit breaker: past `max_drawdown_pct` (15% default) from
   the equity peak, the bot stops opening new trades entirely and needs a
   human to review before continuing.
+
+**Small-account handling.** Every order's quantity is rounded to the
+exchange's step size and skipped if it falls below Bitget's minimum order
+size (~$5 notional) - a real concern at a few hundred euros that doesn't
+exist at $10k. In live mode the bot reads your **actual exchange balance**
+each cycle, so a monthly top-up is picked up automatically as more buying
+power without editing any file. Leverage is deliberately capped low
+(`max_leverage: 3`) and **not** raised for the small account - leverage is
+how small accounts die, not how they grow.
 
 All of these are config knobs in `settings.yaml`, not constants buried in
 code - tune them to your own risk tolerance.
@@ -84,17 +102,18 @@ code - tune them to your own risk tolerance.
 config.py        settings.yaml + .env loader
 models.py         Position / ClosedTrade dataclasses
 indicators.py      EMA/SMA/RSI (standard + fast)/MACD/ATR/Bollinger/ADX/Donchian (pandas, Wilder smoothing)
-strategies.py       ensemble (regime-routed) + mean_reversion_scalp strategies, selected via build_strategy()
+universe.py         liquidity-based dynamic asset selection (filter + rank Bitget perps, drop RWA tokens)
+strategies.py       cross_sectional_momentum + ensemble + mean_reversion_scalp, selected via build_strategy()
 risk_manager.py     position sizing, stops/targets, trailing stops, circuit breakers
 portfolio.py         equity/positions/drawdown tracking, trade log, state persistence
-exchange.py          ccxt Bitget wrapper: public market data, PaperBroker, LiveBroker
-backtester.py         event-driven historical replay with fees + slippage
+exchange.py          ccxt Bitget wrapper: market data, universe fetch, order-size limits, PaperBroker, LiveBroker
+backtester.py         event-driven historical replay with fees + slippage + exchange min-order-size handling
 optimize.py            walk-forward parameter search (train on the past, validate strictly out-of-sample)
-bot.py                 live/paper trading loop
+bot.py                 live/paper trading loop with dynamic universe refresh + live balance sync
 main.py                 CLI: backtest / optimize / run --mode paper|live
 settings.yaml            strategy & risk parameters (safe to edit freely)
 .env.example              API credential template (copy to .env, never commit .env)
-tests/                     pytest suite for indicators, risk manager, backtester
+tests/                     pytest suite (indicators, risk, portfolio, strategies, universe, sizing, backtester, optimizer)
 ```
 
 ## Setup
@@ -113,9 +132,9 @@ cp .env.example .env
 **Backtest** against real historical Bitget data (no API keys required):
 
 ```bash
-python main.py backtest --days 365
-python main.py backtest --days 365 --save-trades trades.jsonl
-python main.py backtest --days 365 --strategy-mode mean_reversion_scalp
+python main.py backtest --days 365                                    # default strategy (cross_sectional_momentum)
+python main.py backtest --days 700 --strategy-mode ensemble           # try another strategy
+python main.py backtest --days 365 --save-trades trades.jsonl         # dump every trade to inspect
 ```
 
 **Paper trade** (default, no API keys required) - runs continuously against
@@ -166,106 +185,147 @@ how you produce an impressive number that's actually just overfit to noise.
 python main.py optimize --days 700 --train-days 300 --test-days 100
 ```
 
-For every rolling window it searches a small parameter grid (regime
-threshold, stop distance, take-profit target - deliberately *not*
-leverage/position size, since cranking those up always makes a backtest
-look better right up until it doesn't) using Sharpe ratio with a
-drawdown-and-trade-count guardrail as the objective, not raw return. The
-chosen parameters are then run once, forward, on the following window they
+For every rolling window it searches a small, **strategy-specific** parameter
+grid (for momentum: lookback, signal-strength floor, stop distance -
+deliberately *not* leverage/position size, since cranking those up always
+makes a backtest look better right up until it doesn't) using Sharpe ratio
+with a drawdown-and-trade-count guardrail as the objective, not raw return.
+The chosen parameters are run once, forward, on the following window they
 were never allowed to see. Every fold's out-of-sample segment is chained
-into one continuous curve - that chained curve is the number to trust, not
-any individual fold's train-set number.
+into one continuous curve - that chained curve is the number to trust.
 
-**Actual result on BTC/ETH/SOL, 4h candles, 700 days, 300d/100d walk-forward
-(run 2026-07-23):**
+```bash
+python main.py optimize --days 700 --train-days 300 --test-days 100
+python main.py optimize --days 700 --strategy-mode ensemble
+```
 
-| Metric | Value |
-|---|---|
-| Chained OOS period | ~400 days across 3 folds |
-| Total return | +1.64% |
-| Sharpe (annualized) | 0.20 |
-| Max drawdown | 19.58% (see caveat below) |
-| Win rate | 44.9% |
-| Profit factor | 1.08 |
-| Trades | 127 |
+## Strategy comparison and honest results
 
-That is a modest, close-to-flat result, not an exciting one - and that's
-the honest answer, not a failure of the tool. The fold-by-fold numbers show
-why: fold 0 (Jul-Oct 2025) returned +17.5% out-of-sample, folds 1 and 2
-gave most of it back (-6.0%, -8.1%). A system that's genuinely +1.64% net
-of costs across regimes it wasn't fit to is a real, if small, edge - and a
-system that claims much more than that from the same data almost always
-got there by fitting noise. `settings.yaml`'s `adx_trend_threshold` and
-`take_profit_r_multiple` were set to this run's most-frequently-reselected
-parameters as a reasonable starting point.
+Every number below is **chained out-of-sample** (walk-forward, ~400 days,
+300d/100d folds) on real Bitget data, net of 0.06% taker fees + 0.05%
+assumed slippage per fill. Run date 2026-07-23.
 
-**Caveat on that 19.58% max drawdown:** it's measured across the chained
-curve, so fold 0's peak bleeding into fold 1's losses can produce a bigger
-swing than the live bot would ever actually sit through - the live/paper
-bot tracks its own equity peak continuously and halts new trades at
-`max_drawdown_pct` (15% by default), which would have intervened before
-this backtest's worst stretch played out in full. Treat the return/Sharpe/
-win-rate numbers as the trustworthy output of this exercise, and the
-drawdown number as directionally worse than reality, not better.
+| Strategy | Universe | OOS return | Sharpe | Profit factor | Max DD | Win rate | Trades |
+|---|---|---|---|---|---|---|---|
+| **cross_sectional_momentum** (default) | 10 liquid perps | **-0.34%** | 0.01 | **1.07** | **10.4%** | 37% | 265 |
+| ensemble | BTC/ETH/SOL | +1.64% | 0.20 | 1.08 | 19.6% | 45% | 127 |
+| mean_reversion_scalp | BTC/ETH/SOL | -2.83% | -0.06 | 1.03 | ~20% | 44% | ~130 |
 
-Re-run this periodically (monthly is reasonable) as new data comes in -
-walk-forward validation is not a one-time exercise, and a parameter set
-that was robust six months ago is not guaranteed to still be robust today.
+**How to read this honestly:**
 
-## Strategy comparison: why win rate isn't the target
+- All three are essentially **break-even net of costs**. None is a money
+  printer. That is the true finding, and it's worth more than a fabricated
+  positive number that would fail live.
+- `cross_sectional_momentum` (the broad-universe rebuild) has a **real gross
+  edge** - profit factor 1.07 means its winning trades outweigh its losers -
+  but 265 trades x ~0.11% round-trip cost is ~a third of the account in
+  cumulative friction, which is what drags it to break-even. Its **10.4% max
+  drawdown across 10 diversified names is the best risk profile here**, and
+  its trending-regime fold posted +8.6% at Sharpe 2.47 before choppy folds
+  gave it back - momentum works in trends and bleeds in chop, as expected.
+- `ensemble` is the only one that edged out net-positive (+1.64%), but on
+  just three highly-correlated coins with a deeper 19.6% drawdown - less
+  diversified and more concentrated than the default.
+- The path from "break-even gross edge" to "net profitable" is **lower
+  trading costs**, not more leverage: maker-limit orders instead of market
+  (turns the 0.06% fee into a rebate), a slower timeframe (fewer trades), or
+  a higher `min_abs_momentum_score` (only the strongest signals). Those are
+  the honest next experiments.
 
-It's tempting to want a win rate over 50% - it feels like "the system is
-usually right." Two separate experiments on this repo's real Bitget data
-both say the same thing: chasing that number here made the system *less*
-profitable, not more. Profitability is win_rate x avg_win vs (1-win_rate) x
-avg_loss - pushing the first term up is not free if it costs more on the
-other two, and in both experiments below it did.
+**On win rate (you asked earlier):** momentum structurally wins <50% of the
+time - it makes money from a few large winners, not from being right often.
+Forcing a >=50% win rate makes these strategies *less* profitable; an
+earlier experiment on `ensemble` drove its OOS return from +1.64% to -8.08%
+by doing exactly that. The `--min-win-rate` flag on `optimize` still lets
+you explore that tradeoff, but it defaults to off for this reason.
 
-**Experiment 1 - constrain the existing `ensemble` strategy's search to
-only accept >=50% training win rate**, same walk-forward setup as above:
+**The multiple-comparisons caveat:** ~100+ parameter combinations were tried
+across these strategies. Walk-forward guards against overfitting a single
+window, but trying many things and reporting the best still bakes in some
+optimism even out-of-sample. Treat these numbers as "roughly break-even with
+a small real edge," not as precise forecasts.
 
-| | Unconstrained (default) | Win rate >=50% forced |
-|---|---|---|
-| Chained OOS return | **+1.64%** | -8.08% |
-| Sharpe | 0.20 | -0.49 |
-| Profit factor | 1.08 (profitable) | 0.93 (losing) |
-| OOS win rate | 44.9% | 47.9% (missed its own target out-of-sample) |
+Re-run `optimize` periodically (monthly is reasonable) as new data arrives -
+a parameter set robust six months ago is not guaranteed robust today.
 
-The constraint pushed the search toward a 1R take-profit (as tight as the
-stop-loss) to win more often. Win rate barely moved out-of-sample - and
-didn't even clear 50% there - while every win got smaller, which was
-strictly worse.
+## First time using Bitget? Step-by-step guide
 
-**Experiment 2 - build `mean_reversion_scalp`, a genuinely different
-strategy** (RSI(2) extreme + Bollinger touch, trades in any regime, designed
-to win more often on smaller moves) and walk-forward optimize it with the
-same >=50%-win-rate constraint active:
+This walks you from zero to a bot trading a small live balance. **Do not
+skip the paper-trading step** - it's how you find out what the bot does with
+money before it's real money.
 
-| | `mean_reversion_scalp`, walk-forward |
-|---|---|
-| Chained OOS return | -2.83% |
-| Sharpe | -0.06 |
-| Profit factor | 1.03 |
-| OOS win rate | 43.8% |
+### 1. Create and fund a Bitget account
+1. Sign up at bitget.com and complete identity verification (required for
+   futures trading).
+2. Deposit USDT (Bitget's quote currency). Your ~200 EUR becomes ~215 USDT.
+   Deposit via card or by transferring crypto and converting to USDT.
+3. Move the USDT into your **USDT-M Futures** wallet (Bitget keeps spot and
+   futures balances separate - the bot trades futures).
 
-Every one of the 54 grid combinations tested, on every fold, failed to hit
-50% win rate on its own training data - the search fell back to
-`settings.yaml` defaults every time (reported in the CLI output, not
-hidden). A single full-history backtest at those defaults (`main.py
-backtest --strategy-mode mean_reversion_scalp --days 700`) came out to
--12.30%, worse still.
+### 2. Create an API key (the bot's login)
+1. Bitget web -> profile icon -> **API Management** -> **Create API Key** ->
+   choose **System-generated**.
+2. Permissions: enable **read** and **Futures/Contract Trade** only. **Leave
+   withdrawals DISABLED.** A trading bot never needs to withdraw; a key that
+   can't withdraw can't drain your account if it leaks.
+3. Set a passphrase when prompted (you choose it) - you'll need it below.
+4. Optional but recommended: bind the key to your server's IP address.
+5. Copy the three values it shows once: **API Key**, **Secret Key**,
+   **Passphrase**. The secret is shown only once.
 
-**Conclusion, stated plainly:** across two independently-designed
-approaches, nothing tested clears 50% win rate on this data without
-becoming unprofitable or staying unprofitable. `settings.yaml` stays on
-`ensemble` with its unconstrained, walk-forward-validated parameters
-(+1.64% chained OOS return, Sharpe 0.20, profit factor 1.08) because it is
-the only configuration in this whole exercise that is both validated
-out-of-sample and actually makes money. `mean_reversion_scalp` ships as a
-selectable, tested, honestly-documented option for further experimentation
-- e.g. a lower `MIN_WIN_RATE_PCT` in `optimize.py`, additional indicator
-filters, or blending it with `ensemble` as a second sleeve - but it is not
-currently recommended over the default.
+### 3. Install and configure the bot
+```bash
+git clone <your repo URL>
+cd bot
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+Open `.env` and paste your three keys:
+```
+BITGET_API_KEY=...
+BITGET_API_SECRET=...
+BITGET_API_PASSPHRASE=...
+LIVE_TRADING_ENABLED=false
+```
+Set `starting_equity` in `settings.yaml` to your deposit in USDT (e.g. 215).
+
+### 4. Backtest, then paper trade (no real money)
+```bash
+python main.py backtest --days 365          # see historical behavior
+python main.py run --mode paper             # trade live prices, fake fills
+```
+Let paper mode run for **at least a few weeks**. Watch `logs/bot.log` and
+`state/paper/trades.jsonl`. You're checking that it behaves sanely, not that
+it's instantly profitable. Stop it anytime with Ctrl-C; it resumes state on
+restart.
+
+### 5. Go live - small, and only when ready
+Only after paper trading has convinced you:
+1. In `.env` set `LIVE_TRADING_ENABLED=true`.
+2. Start with a small balance you can afford to lose entirely.
+3. Run:
+```bash
+python main.py run --mode live --i-understand-the-risk
+```
+Both the `.env` flag and the `--i-understand-the-risk` flag are required on
+purpose - two deliberate steps so you never start live by accident.
+
+### 6. Keep it running and top up
+- Run it on a machine that stays on (a cheap VPS, or a Raspberry Pi).
+  Inside `tmux`/`screen` or as a `systemd` service so it survives logouts.
+- Your planned monthly top-ups: just deposit more USDT into the futures
+  wallet. In live mode the bot reads your real balance each cycle and sizes
+  up automatically - no config edit, no restart needed.
+- Re-run `python main.py optimize` every month or so and update
+  `settings.yaml` if the walk-forward picks new parameters.
+
+### Safety reminders
+- Never enable withdrawal permission on the API key.
+- Never commit your `.env` (it's gitignored - keep it that way).
+- The bot can lose money, including all of it. Only trade what you can lose.
+- If anything looks wrong, Ctrl-C stops it; the `max_drawdown_pct` breaker
+  also halts new trades automatically past a 15% drawdown.
 
 ## Uploaded reference files
 

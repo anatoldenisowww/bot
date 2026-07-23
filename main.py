@@ -11,23 +11,41 @@ import logging
 import signal
 import sys
 from datetime import datetime, timedelta, timezone
+from typing import Dict, List
 
 from tabulate import tabulate
 
 from backtester import run_backtest
 from bot import QuantTradingBot
 from config import Config, load_config
-from exchange import MarketDataFeed
+from exchange import MarketDataFeed, MarketLimits
 from logging_setup import setup_logging
-from optimize import MIN_WIN_RATE_PCT, most_common_params, walk_forward_optimize
+from optimize import most_common_params, walk_forward_optimize
 
 logger = logging.getLogger(__name__)
 
 
-def _fetch_price_data(cfg: Config, feed: MarketDataFeed, days: int) -> dict:
+def _resolve_symbols(cfg: Config, feed: MarketDataFeed) -> List[str]:
+    if cfg.strategy.mode != "cross_sectional_momentum":
+        return list(cfg.exchange.symbols)
+
+    symbols = feed.fetch_liquid_universe(cfg.strategy.universe_top_n, cfg.strategy.universe_min_quote_volume_24h)
+    print(f"Cross-sectional universe - today's liquidity snapshot, {len(symbols)} symbols: {symbols}")
+    print(
+        "Note: backtest/optimize apply TODAY's liquidity ranking across the whole historical window, not a "
+        "true point-in-time reconstruction (that would need historical daily volume per symbol). A symbol "
+        "that only recently became liquid enough to rank will still show its full price history in this "
+        "backtest even though it wouldn't have been selected back then - a real, known simplification, not "
+        "survivorship-bias-free. Live/paper trading doesn't have this issue: it re-scans the actual current "
+        "board every universe_refresh_hours.\n"
+    )
+    return symbols
+
+
+def _fetch_price_data(cfg: Config, feed: MarketDataFeed, days: int, symbols: List[str]) -> dict:
     since_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
     price_data = {}
-    for symbol in cfg.exchange.symbols:
+    for symbol in symbols:
         logger.info("fetching %s %s history since %s", symbol, cfg.exchange.timeframe, since_ms)
         df = feed.fetch_ohlcv_since(symbol, cfg.exchange.timeframe, since_ms)
         if df.empty:
@@ -35,6 +53,16 @@ def _fetch_price_data(cfg: Config, feed: MarketDataFeed, days: int) -> dict:
             continue
         price_data[symbol] = df
     return price_data
+
+
+def _fetch_market_limits(feed: MarketDataFeed, symbols: List[str]) -> Dict[str, MarketLimits]:
+    limits = {}
+    for symbol in symbols:
+        try:
+            limits[symbol] = feed.get_market_limits(symbol)
+        except Exception:
+            logger.exception("failed to fetch market limits for %s, entries on it won't be size-clamped", symbol)
+    return limits
 
 
 def cmd_backtest(args: argparse.Namespace) -> None:
@@ -47,13 +75,15 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         cfg.strategy.mode = args.strategy_mode
 
     feed = MarketDataFeed(cfg)
-    price_data = _fetch_price_data(cfg, feed, args.days)
+    symbols = _resolve_symbols(cfg, feed)
+    price_data = _fetch_price_data(cfg, feed, args.days, symbols)
 
     if len(price_data) < 1:
         print("No market data fetched for any symbol - aborting.")
         sys.exit(1)
 
-    result = run_backtest(cfg, price_data)
+    market_limits = _fetch_market_limits(feed, list(price_data.keys()))
+    result = run_backtest(cfg, price_data, market_limits=market_limits)
     s = result.stats
 
     print("\n=== Backtest results ===")
@@ -103,10 +133,13 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         cfg.strategy.mode = args.strategy_mode
 
     feed = MarketDataFeed(cfg)
-    price_data = _fetch_price_data(cfg, feed, args.days)
+    symbols = _resolve_symbols(cfg, feed)
+    price_data = _fetch_price_data(cfg, feed, args.days, symbols)
     if len(price_data) < 1:
         print("No market data fetched for any symbol - aborting.")
         sys.exit(1)
+
+    market_limits = _fetch_market_limits(feed, list(price_data.keys()))
 
     print(
         f"Strategy: {cfg.strategy.mode}\n"
@@ -115,17 +148,39 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         f"history. Every fold's parameters are chosen only from data before that fold's test window.\n"
     )
 
+    if args.min_win_rate > 0:
+        print(
+            f"Win-rate floor active: only parameter sets with >={args.min_win_rate:.0f}% TRAINING win rate "
+            "are eligible. Note we've shown this tends to REDUCE profitability (momentum structurally wins "
+            "<50% of the time); it's here because you can ask for it, not because it's recommended.\n"
+        )
+
     result = walk_forward_optimize(
         cfg, price_data, train_days=args.train_days, test_days=args.test_days, step_days=args.step_days,
+        market_limits=market_limits, min_win_rate_pct=args.min_win_rate,
     )
+
+    def _format_params(params: dict) -> str:
+        # abbreviate whatever knobs this strategy's grid actually tuned
+        abbrev = {
+            "adx_trend_threshold": "adx>=", "atr_stop_multiplier": "atr_x",
+            "take_profit_r_multiple": "tp", "momentum_lookback_bars": "lb",
+            "min_abs_momentum_score": "minscore",
+        }
+        parts = []
+        for key, value in params.items():
+            label = abbrev.get(key, key + "=")
+            parts.append(f"{label}{value:g}")
+        return " ".join(parts)
 
     rows = []
     for f in result.folds:
+        params_str = _format_params(f.best_params)
         rows.append([
             f.fold_index,
             f.test_start.strftime("%Y-%m-%d"),
             f.test_end.strftime("%Y-%m-%d"),
-            f"adx>={f.best_params['adx_trend_threshold']:.0f} atr_x{f.best_params['atr_stop_multiplier']:.1f} tp{f.best_params['take_profit_r_multiple']:.1f}R" + ("" if f.guardrails_cleared else " (fallback*)"),
+            params_str + ("" if f.guardrails_cleared else " (fallback*)"),
             f"{f.train_stats.win_rate:.0f}%",
             f.train_stats.total_trades,
             f"{f.train_stats.sharpe_ratio:.2f}",
@@ -144,11 +199,11 @@ def cmd_optimize(args: argparse.Namespace) -> None:
 
     fallback_folds = [f.fold_index for f in result.folds if not f.guardrails_cleared]
     if fallback_folds:
+        constraint_desc = f"{args.min_win_rate:.0f}%+ training win rate together with the " if args.min_win_rate > 0 else "the "
         print(
-            f"\n* fold(s) {fallback_folds}: no combination in the parameter grid hit "
-            f"{MIN_WIN_RATE_PCT:.0f}%+ training win rate together with the drawdown/trade-count "
-            "guardrails, so that fold fell back to settings.yaml's existing defaults instead of "
-            "forcing a pick. This is being reported, not hidden."
+            f"\n* fold(s) {fallback_folds}: no combination in the parameter grid cleared "
+            f"{constraint_desc}drawdown/trade-count guardrails, so that fold fell back to "
+            "settings.yaml's existing defaults instead of forcing a pick. This is being reported, not hidden."
         )
 
     s = result.chained_stats
@@ -243,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bitget quant trading bot for BTC/ETH/SOL")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    strategy_choices = ["ensemble", "mean_reversion_scalp"]
+    strategy_choices = ["ensemble", "mean_reversion_scalp", "cross_sectional_momentum"]
 
     bt = sub.add_parser("backtest", help="backtest the strategy against historical Bitget data")
     bt.add_argument("--days", type=int, default=365, help="how many days of history to fetch")
@@ -259,6 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--train-days", type=int, default=300, help="length of each training window")
     opt.add_argument("--test-days", type=int, default=100, help="length of each out-of-sample test window")
     opt.add_argument("--step-days", type=int, default=None, help="how far to roll forward between folds (defaults to --test-days)")
+    opt.add_argument("--min-win-rate", type=float, default=0.0, help="optional training win-rate floor (%%). Off by default; we've shown it tends to reduce profitability")
     opt.add_argument("--save-folds", type=str, default=None, help="optional path to save per-fold summaries as JSONL")
     opt.set_defaults(func=cmd_optimize)
 

@@ -27,15 +27,16 @@ import backtester
 import indicators
 from backtester import BacktestResult, BacktestStats
 from config import Config
+from exchange import MarketLimits
 
-# Parameters searched here deliberately exclude anything that changes the
-# *indicator* DataFrames (EMA/RSI/BB/ATR/ADX periods) so those only need to
-# be computed once per symbol for the whole optimization run, not once per
-# candidate. adx_trend_threshold only affects how strategies.py *interprets*
-# the ADX column, not how it's computed - safe to vary here. If you extend
-# this grid with an indicator-period parameter, computing dfs must move
-# inside the fold/combo loop.
-PARAM_GRID: Dict[str, List[float]] = {
+# The grid is strategy-specific: optimizing a strategy over parameters it
+# doesn't use (e.g. sweeping adx_trend_threshold for cross_sectional_momentum,
+# which never reads it) is just wasted compute that also inflates the
+# multiple-comparisons problem. _param_grid_for(mode) returns the knobs that
+# actually change THAT strategy's behavior. Everything here is safe to vary
+# without recomputing indicator DataFrames - none of these are indicator
+# periods (see the note in walk_forward_optimize).
+_ENSEMBLE_GRID: Dict[str, List[float]] = {
     "adx_trend_threshold": [20, 25, 30],
     "atr_stop_multiplier": [1.5, 2.0, 2.5],
     # Smaller multiples pull the take-profit closer to the stop distance,
@@ -44,6 +45,37 @@ PARAM_GRID: Dict[str, List[float]] = {
     # >=50%-win-rate configurations, not just approach the constraint.
     "take_profit_r_multiple": [1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
 }
+
+_MEAN_REVERSION_GRID: Dict[str, List[float]] = {
+    "atr_stop_multiplier": [1.5, 2.0, 2.5],
+    "take_profit_r_multiple": [1.0, 1.25, 1.5, 2.0, 2.5],
+}
+
+# Cross-sectional momentum's edge lives in the ranking knobs, not the
+# stop/target. The default-parameter backtest showed ~400 trades/yr with
+# profit factor ~0.99 - i.e. costs were eating a real gross edge - so the
+# grid deliberately spans LONGER lookbacks (slower, less turnover) and a
+# range of signal-strength floors (higher = fewer, higher-conviction trades)
+# to give the search a way to trade less and keep more.
+_CROSS_SECTIONAL_GRID: Dict[str, List[float]] = {
+    "momentum_lookback_bars": [20, 40, 60, 90],
+    "min_abs_momentum_score": [0.5, 1.0, 1.5, 2.0],
+    "atr_stop_multiplier": [2.0, 3.0],
+}
+
+
+def _param_grid_for(mode: str) -> Dict[str, List[float]]:
+    if mode == "ensemble":
+        return _ENSEMBLE_GRID
+    if mode == "mean_reversion_scalp":
+        return _MEAN_REVERSION_GRID
+    if mode == "cross_sectional_momentum":
+        return _CROSS_SECTIONAL_GRID
+    raise ValueError(f"no parameter grid defined for strategy mode {mode!r}")
+
+
+# Back-compat alias: earlier code/tests referenced PARAM_GRID directly.
+PARAM_GRID = _ENSEMBLE_GRID
 
 # risk_per_trade_pct / leverage are intentionally NOT searched. Cranking up
 # position size always makes a backtest look better right up until it
@@ -84,36 +116,66 @@ class WalkForwardResult:
     chained_stats: BacktestStats
 
 
-def _grid_combos():
-    keys = list(PARAM_GRID)
-    for values in itertools.product(*(PARAM_GRID[k] for k in keys)):
+def _grid_combos(mode: str):
+    grid = _param_grid_for(mode)
+    keys = list(grid)
+    for values in itertools.product(*(grid[k] for k in keys)):
         yield dict(zip(keys, values))
+
+
+# Which config field each tunable parameter maps onto. Keeps _apply_params a
+# simple data-driven loop instead of a growing if/elif per parameter.
+_PARAM_TARGETS = {
+    "adx_trend_threshold": ("indicators", "adx_trend_threshold"),
+    "atr_stop_multiplier": ("risk", "atr_stop_multiplier"),
+    "take_profit_r_multiple": ("risk", "take_profit_r_multiple"),
+    "momentum_lookback_bars": ("strategy", "momentum_lookback_bars"),
+    "min_abs_momentum_score": ("strategy", "min_abs_momentum_score"),
+}
 
 
 def _apply_params(cfg: Config, params: Dict[str, float]) -> Config:
     trial = deepcopy(cfg)
-    trial.indicators.adx_trend_threshold = params["adx_trend_threshold"]
-    trial.risk.atr_stop_multiplier = params["atr_stop_multiplier"]
-    trial.risk.take_profit_r_multiple = params["take_profit_r_multiple"]
+    for name, value in params.items():
+        section, field = _PARAM_TARGETS[name]
+        setattr(getattr(trial, section), field, value)
     return trial
 
 
-def _objective(stats: BacktestStats) -> float:
+def _fallback_params(cfg: Config, mode: str) -> Dict[str, float]:
+    """The strategy's current settings.yaml values for exactly the knobs this
+    mode's grid searches - used when nothing in the grid clears the guardrails
+    on a fold, so the fallback is comparable to the searched candidates."""
+    grid = _param_grid_for(mode)
+    fallback = {}
+    for name in grid:
+        section, field = _PARAM_TARGETS[name]
+        fallback[name] = getattr(getattr(cfg, section), field)
+    return fallback
+
+
+def _objective(stats: BacktestStats, min_win_rate_pct: float) -> float:
     """Risk-adjusted score with guardrails against picking a fluke.
 
     Raw return is not used as the objective on purpose - it's what a
     single lucky trade optimizes for. Sharpe with a trade-count floor and a
     drawdown ceiling rewards a parameter set that traded enough to mean
-    something and didn't get there by taking reckless risk. win_rate is a
-    hard constraint, not part of the score, so among everything that clears
-    50% the search still picks the best risk-adjusted candidate rather than
-    just the highest win rate.
+    something and didn't get there by taking reckless risk. When a win-rate
+    floor is requested it's a hard constraint, not part of the score, so
+    among everything that clears it the search still picks the best
+    risk-adjusted candidate rather than just the highest win rate.
+
+    min_win_rate_pct defaults to 0 (off) at the call sites, because we showed
+    empirically that forcing >50% win rate makes these strategies less
+    profitable, not more - momentum in particular structurally wins <50% of
+    the time. The knob stays available for anyone who wants to explore that
+    tradeoff, but it's opt-in, not the default that quietly hobbles a strategy.
     """
     if stats.total_trades < MIN_TRADES_FOR_VALID_FOLD:
         return float("-inf")
     if stats.max_drawdown_pct > MAX_ACCEPTABLE_TRAIN_DRAWDOWN_PCT:
         return float("-inf")
-    if stats.win_rate < MIN_WIN_RATE_PCT:
+    if stats.win_rate < min_win_rate_pct:
         return float("-inf")
     return stats.sharpe_ratio
 
@@ -128,6 +190,8 @@ def walk_forward_optimize(
     train_days: int,
     test_days: int,
     step_days: Optional[int] = None,
+    market_limits: Optional[Dict[str, MarketLimits]] = None,
+    min_win_rate_pct: float = 0.0,
 ) -> WalkForwardResult:
     step_days = step_days or test_days
 
@@ -154,10 +218,10 @@ def walk_forward_optimize(
         best_score = float("-inf")
         best_train_stats: Optional[BacktestStats] = None
 
-        for params in _grid_combos():
+        for params in _grid_combos(cfg.strategy.mode):
             trial_cfg = _apply_params(cfg, params)
-            result = backtester.simulate(trial_cfg, dfs, train_start_idx, train_end_idx)
-            score = _objective(result.stats)
+            result = backtester.simulate(trial_cfg, dfs, train_start_idx, train_end_idx, market_limits=market_limits)
+            score = _objective(result.stats, min_win_rate_pct)
             if score > best_score:
                 best_score = score
                 best_params = params
@@ -170,15 +234,11 @@ def walk_forward_optimize(
             # cuts losers quickly and lets winners run structurally tends
             # toward <50% win rate) - fall back to settings.yaml defaults
             # rather than force a pick, and say so plainly in the report.
-            best_params = {
-                "adx_trend_threshold": cfg.indicators.adx_trend_threshold,
-                "atr_stop_multiplier": cfg.risk.atr_stop_multiplier,
-                "take_profit_r_multiple": cfg.risk.take_profit_r_multiple,
-            }
-            best_train_stats = backtester.simulate(cfg, dfs, train_start_idx, train_end_idx).stats
+            best_params = _fallback_params(cfg, cfg.strategy.mode)
+            best_train_stats = backtester.simulate(cfg, dfs, train_start_idx, train_end_idx, market_limits=market_limits).stats
 
         test_cfg = _apply_params(cfg, best_params)
-        test_result = backtester.simulate(test_cfg, dfs, test_start_idx, test_end_idx)
+        test_result = backtester.simulate(test_cfg, dfs, test_start_idx, test_end_idx, market_limits=market_limits)
 
         folds.append(FoldResult(
             fold_index=fold_index,

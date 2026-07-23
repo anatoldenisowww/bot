@@ -4,7 +4,7 @@ import pytest
 
 import indicators
 from config import load_config
-from strategies import EnsembleStrategy, MeanReversionScalpStrategy, build_strategy
+from strategies import CrossSectionalMomentumStrategy, EnsembleStrategy, MeanReversionScalpStrategy, build_strategy
 
 
 def _make_df(n=300, seed=0):
@@ -20,10 +20,15 @@ def _make_df(n=300, seed=0):
 
 def test_build_strategy_selects_correct_class():
     cfg = load_config()
-    assert isinstance(build_strategy("ensemble", cfg.indicators), EnsembleStrategy)
-    assert isinstance(build_strategy("mean_reversion_scalp", cfg.indicators), MeanReversionScalpStrategy)
+    cfg.strategy.mode = "ensemble"
+    assert isinstance(build_strategy(cfg), EnsembleStrategy)
+    cfg.strategy.mode = "mean_reversion_scalp"
+    assert isinstance(build_strategy(cfg), MeanReversionScalpStrategy)
+    cfg.strategy.mode = "cross_sectional_momentum"
+    assert isinstance(build_strategy(cfg), CrossSectionalMomentumStrategy)
+    cfg.strategy.mode = "not_a_real_mode"
     with pytest.raises(ValueError):
-        build_strategy("not_a_real_mode", cfg.indicators)
+        build_strategy(cfg)
 
 
 def test_mean_reversion_scalp_returns_flat_when_warming_up():

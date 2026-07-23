@@ -1,18 +1,26 @@
 """Signal generation.
 
-Design: detect the market regime first (trending vs ranging, via ADX on the
-execution timeframe), then let the sub-strategy suited to that regime drive
-the decision. A higher-timeframe EMA filter has veto power over direction -
-we never take a countertrend trade against the higher timeframe.
+Two families of strategy, both driven off indicator columns already computed
+by indicators.add_all_indicators - no I/O, no hidden state, easy to unit
+test and to run inside the backtester and the live bot alike.
 
-Every strategy is a pure function of a DataFrame (already carrying indicator
-columns from indicators.add_all_indicators) -> Signal. No I/O, no state,
-easy to unit test and to run inside the backtester and the live bot alike.
+- PerSymbolStrategy subclasses (EnsembleStrategy, MeanReversionScalpStrategy)
+  decide each symbol independently from its own history.
+- CrossSectionalMomentumStrategy decides jointly across the whole tradable
+  universe at once (rank everyone, trade the extremes) - it structurally
+  cannot answer "what's the signal for this one symbol" without seeing
+  every other symbol's current data too.
+
+Both shapes expose the same batch interface the backtester and bot actually
+call: generate_signals(dfs, i) -> {symbol: Signal}, plus
+should_exit_on_signal(position_side, signal) -> bool, which is a genuine
+policy difference between the two families (see CrossSectionalMomentumStrategy
+docstring) and not just an implementation detail.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 import pandas as pd
 
@@ -90,7 +98,32 @@ def breakout_signal(df: pd.DataFrame) -> Signal:
     return Signal("FLAT", 0.0, "breakout")
 
 
-class EnsembleStrategy:
+class PerSymbolStrategy:
+    """Base for strategies whose decision only needs one symbol's own
+    history. Subclasses implement generate_signal(df); this provides the
+    batch generate_signals(dfs, i) interface the backtester/bot actually
+    call, and the default exit policy: exit only on a true flip to the
+    opposite side, not merely fading to FLAT. That's a deliberate choice,
+    not an oversight - these strategies were walk-forward validated with
+    that exact exit rule, and loosening it would change validated behavior.
+    """
+
+    def generate_signal(self, df: pd.DataFrame) -> Signal:
+        raise NotImplementedError
+
+    def generate_signals(self, dfs: Dict[str, pd.DataFrame], i: Optional[int] = None) -> Dict[str, Signal]:
+        signals = {}
+        for sym, df in dfs.items():
+            idx = i if i is not None else len(df) - 1
+            signals[sym] = self.generate_signal(df.iloc[: idx + 1])
+        return signals
+
+    def should_exit_on_signal(self, position_side: Side, signal: Signal) -> bool:
+        opposite = "SHORT" if position_side == "LONG" else "LONG"
+        return bool(signal) and signal.side == opposite
+
+
+class EnsembleStrategy(PerSymbolStrategy):
     """Regime router: picks which sub-strategy gets to speak, based on ADX.
 
     ADX >= threshold  -> trending regime  -> trend-following + breakout vote
@@ -125,7 +158,7 @@ class EnsembleStrategy:
         return Signal("FLAT", 0.0, "range", ["ranging regime, no extreme reached"])
 
 
-class MeanReversionScalpStrategy:
+class MeanReversionScalpStrategy(PerSymbolStrategy):
     """Fades short-term statistical extremes: a very short RSI (period 2 by
     default) at a deep oversold/overbought reading, confirmed by the price
     also touching the Bollinger Band. Structurally different from
@@ -179,9 +212,92 @@ class MeanReversionScalpStrategy:
         return Signal("FLAT", 0.0, "mr_scalp")
 
 
-def build_strategy(mode: str, indicator_cfg):
+class CrossSectionalMomentumStrategy:
+    """Ranks the whole tradable universe by risk-adjusted momentum each bar
+    and takes positions in the strongest and weakest names, instead of one
+    time-series signal on one symbol at a time.
+
+    Score per symbol = (price_now - price_lookback_bars_ago) / (ATR *
+    sqrt(lookback_bars)) - a Sharpe-like measure of trend strength relative
+    to that symbol's own typical volatility. Normalizing by ATR matters: a
+    micro-cap that moved 8% and a major that moved 1% aren't comparable on
+    raw return alone, since the micro-cap might just be more volatile in
+    general, not stronger relative to its own noise. Ranking on raw return
+    would systematically bias every pick toward whatever is most volatile.
+
+    The exit policy genuinely differs from PerSymbolStrategy: a position's
+    reason for existing is "currently ranked in the top/bottom K," so it
+    should close as soon as that stops being true - including merely fading
+    to FLAT, not only flipping to the opposite side.
+    """
+
+    def __init__(self, strategy_cfg):
+        self.cfg = strategy_cfg
+
+    def _score(self, df: pd.DataFrame, idx: int) -> Optional[float]:
+        lookback = self.cfg.momentum_lookback_bars
+        if idx < lookback:
+            return None
+        row = df.iloc[idx]
+        if pd.isna(row[["close", "atr"]]).any():
+            return None
+        atr = row["atr"]
+        if not atr or atr <= 0:
+            return None
+        price_then = df["close"].iloc[idx - lookback]
+        if pd.isna(price_then):
+            return None
+        return (row["close"] - price_then) / (atr * (lookback ** 0.5))
+
+    def generate_signal(self, df: pd.DataFrame) -> Signal:
+        raise NotImplementedError(
+            "CrossSectionalMomentumStrategy needs the whole universe at once - "
+            "call generate_signals(dfs, i), not generate_signal(df)."
+        )
+
+    def generate_signals(self, dfs: Dict[str, pd.DataFrame], i: Optional[int] = None) -> Dict[str, Signal]:
+        scores: Dict[str, float] = {}
+        for sym, df in dfs.items():
+            idx = i if i is not None else len(df) - 1
+            score = self._score(df, idx)
+            if score is not None:
+                scores[sym] = score
+
+        signals: Dict[str, Signal] = {sym: Signal("FLAT", 0.0, "cross_sectional_momentum") for sym in dfs}
+        if not scores:
+            return signals
+
+        ranked = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
+        top = [sym for sym, score in ranked[: self.cfg.top_k] if score >= self.cfg.min_abs_momentum_score]
+        bottom = []
+        if self.cfg.bottom_k > 0:
+            bottom = [sym for sym, score in ranked[-self.cfg.bottom_k:] if score <= -self.cfg.min_abs_momentum_score]
+            bottom = [sym for sym in bottom if sym not in top]  # guard tiny universes where slices overlap
+
+        for sym in top:
+            confidence = min(0.9, 0.4 + abs(scores[sym]) * 0.1)
+            signals[sym] = Signal(
+                "LONG", confidence, "cross_sectional_momentum",
+                [f"momentum score {scores[sym]:+.2f}, ranked in top {self.cfg.top_k}"],
+            )
+        for sym in bottom:
+            confidence = min(0.9, 0.4 + abs(scores[sym]) * 0.1)
+            signals[sym] = Signal(
+                "SHORT", confidence, "cross_sectional_momentum",
+                [f"momentum score {scores[sym]:+.2f}, ranked in bottom {self.cfg.bottom_k}"],
+            )
+        return signals
+
+    def should_exit_on_signal(self, position_side: Side, signal: Signal) -> bool:
+        return signal.side != position_side
+
+
+def build_strategy(cfg):
+    mode = cfg.strategy.mode
     if mode == "ensemble":
-        return EnsembleStrategy(indicator_cfg)
+        return EnsembleStrategy(cfg.indicators)
     if mode == "mean_reversion_scalp":
-        return MeanReversionScalpStrategy(indicator_cfg)
+        return MeanReversionScalpStrategy(cfg.indicators)
+    if mode == "cross_sectional_momentum":
+        return CrossSectionalMomentumStrategy(cfg.strategy)
     raise ValueError(f"unknown strategy mode: {mode!r}")

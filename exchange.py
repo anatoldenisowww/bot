@@ -16,13 +16,15 @@ caring which one it is (duck typing on execute_market_order/get_price).
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 import ccxt
 import pandas as pd
 
+import universe
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,37 @@ class Fill:
     price: float
     fee: float
     qty: float
+
+
+@dataclass
+class MarketLimits:
+    amount_step: float   # smallest increment the exchange accepts for order quantity
+    amount_min: float    # smallest order quantity accepted
+    cost_min: float       # smallest order notional (qty * price) accepted
+
+
+def round_down_to_step(qty: float, step: float) -> float:
+    if step <= 0:
+        return qty
+    return math.floor(qty / step) * step
+
+
+def clamp_qty_to_market(qty: float, price: float, limits: MarketLimits) -> float:
+    """Round a risk-sized quantity down to what the exchange will actually
+    accept, or return 0.0 if it can't meet the exchange's minimums.
+
+    This matters far more at 200 EUR than it did in the $10k backtests: a 1%
+    risk trade on a volatile small-cap perp can size out well below a $5
+    minimum notional, and an order the exchange silently rejects is a much
+    worse failure mode than a strategy that skips a trade it can't actually
+    place.
+    """
+    rounded = round_down_to_step(qty, limits.amount_step)
+    if rounded < limits.amount_min:
+        return 0.0
+    if limits.cost_min and rounded * price < limits.cost_min:
+        return 0.0
+    return rounded
 
 
 def _make_ccxt_client(cfg: Config, with_credentials: bool) -> ccxt.Exchange:
@@ -60,6 +93,29 @@ class MarketDataFeed:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.client = _make_ccxt_client(cfg, with_credentials=False)
+        self._markets_cache: Optional[Dict[str, dict]] = None
+
+    def load_markets(self, reload: bool = False) -> Dict[str, dict]:
+        if self._markets_cache is None or reload:
+            self._markets_cache = self.client.load_markets(reload=reload)
+        return self._markets_cache
+
+    def get_market_limits(self, symbol: str) -> MarketLimits:
+        market = self.load_markets()[symbol]
+        limits = market.get("limits", {})
+        precision = market.get("precision", {})
+        amount_step = precision.get("amount") or 0.0
+        amount_min = (limits.get("amount") or {}).get("min") or 0.0
+        cost_min = (limits.get("cost") or {}).get("min") or 0.0
+        return MarketLimits(amount_step=amount_step, amount_min=max(amount_min, amount_step), cost_min=cost_min)
+
+    def fetch_liquid_universe(self, top_n: int, min_quote_volume_24h: float, exclude: Optional[List[str]] = None) -> List[str]:
+        """Rank Bitget's full USDT-M perpetual board by 24h quote volume and
+        return the top_n most liquid eligible symbols. See universe.py for
+        the filtering/ranking logic - this method is just the network call."""
+        markets = self.load_markets()
+        tickers = self.client.fetch_tickers(params={"productType": "USDT-FUTURES"})
+        return universe.select_universe(tickers, markets, top_n, min_quote_volume_24h, exclude=exclude)
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 300, since: Optional[int] = None) -> pd.DataFrame:
         raw = self.client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit, since=since)

@@ -52,3 +52,45 @@ def test_backtest_raises_on_too_little_data():
         assert False, "expected ValueError for insufficient candles"
     except ValueError:
         pass
+
+
+def test_backtest_runs_cross_sectional_mode_end_to_end():
+    cfg = load_config()
+    cfg.strategy.mode = "cross_sectional_momentum"
+    cfg.strategy.top_k = 2
+    cfg.strategy.bottom_k = 2
+    cfg.strategy.min_abs_momentum_score = 0.0
+
+    # A basket with a spread of drifts so the ranking has something to sort.
+    price_data = {
+        f"C{i}/USDT:USDT": _synthetic_ohlcv(seed=i, drift=0.05 * (i - 4), start=20.0 + i)
+        for i in range(8)
+    }
+
+    result = run_backtest(cfg, price_data)
+
+    assert result.stats.final_equity > 0
+    assert isinstance(result.stats.total_trades, int)
+    assert len(result.equity_curve) > 0
+    # cross-sectional exits show up as signal_exit, stop_loss, take_profit, or end_of_backtest
+    for trade in result.trades:
+        assert trade.reason in {"signal_exit", "stop_loss", "take_profit", "end_of_backtest"}
+
+
+def test_backtest_respects_market_limits_skipping_tiny_notional():
+    from exchange import MarketLimits
+    cfg = load_config()
+    cfg.risk.starting_equity = 200.0
+
+    price_data = {
+        "BTC/USDT:USDT": _synthetic_ohlcv(seed=1),
+        "ETH/USDT:USDT": _synthetic_ohlcv(seed=2, start=50.0),
+    }
+    # An absurd $1e9 minimum notional makes every risk-sized order too small
+    # to place -> zero trades, proving the clamp is actually wired in.
+    impossible_limits = {
+        sym: MarketLimits(amount_step=0.0001, amount_min=0.0001, cost_min=1e9)
+        for sym in price_data
+    }
+    result = run_backtest(cfg, price_data, market_limits=impossible_limits)
+    assert result.stats.total_trades == 0

@@ -2,7 +2,10 @@ import numpy as np
 import pandas as pd
 
 from config import load_config
-from optimize import walk_forward_optimize, most_common_params, _grid_combos, PARAM_GRID
+from optimize import (
+    walk_forward_optimize, most_common_params, _grid_combos, _param_grid_for,
+    _apply_params, _CROSS_SECTIONAL_GRID,
+)
 
 
 def _synthetic_ohlcv(n, seed, drift=0.1, start=100.0) -> pd.DataFrame:
@@ -25,17 +28,32 @@ def _synthetic_ohlcv(n, seed, drift=0.1, start=100.0) -> pd.DataFrame:
     })
 
 
-def test_grid_combos_matches_expected_size():
-    combos = list(_grid_combos())
-    expected = 1
-    for values in PARAM_GRID.values():
-        expected *= len(values)
-    assert len(combos) == expected
-    assert all(set(c.keys()) == set(PARAM_GRID.keys()) for c in combos)
+def test_grid_combos_matches_expected_size_per_mode():
+    for mode in ("ensemble", "mean_reversion_scalp", "cross_sectional_momentum"):
+        grid = _param_grid_for(mode)
+        combos = list(_grid_combos(mode))
+        expected = 1
+        for values in grid.values():
+            expected *= len(values)
+        assert len(combos) == expected
+        assert all(set(c.keys()) == set(grid.keys()) for c in combos)
+
+
+def test_cross_sectional_params_apply_to_strategy_config():
+    cfg = load_config()
+    cfg.strategy.mode = "cross_sectional_momentum"
+    params = {"momentum_lookback_bars": 60, "min_abs_momentum_score": 1.5, "atr_stop_multiplier": 3.0}
+    trial = _apply_params(cfg, params)
+    assert trial.strategy.momentum_lookback_bars == 60
+    assert trial.strategy.min_abs_momentum_score == 1.5
+    assert trial.risk.atr_stop_multiplier == 3.0
+    # the searched keys must all be real grid keys for this mode
+    assert set(params.keys()) == set(_CROSS_SECTIONAL_GRID.keys())
 
 
 def test_walk_forward_optimize_runs_and_produces_folds():
     cfg = load_config()
+    cfg.strategy.mode = "ensemble"  # pin the mode so param keys are deterministic regardless of settings.yaml default
     # 4h bars: 6/day. Small train/test windows keep this test fast.
     price_data = {
         "BTC/USDT:USDT": _synthetic_ohlcv(n=1400, seed=1),

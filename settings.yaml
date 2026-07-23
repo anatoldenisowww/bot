@@ -6,9 +6,9 @@ exchange:
   id: bitget
   market_type: swap          # USDT-M perpetual futures
   quote: USDT
-  symbols:
-    - BTC/USDT:USDT
-    - ETH/USDT:USDT
+  symbols:                    # fixed fallback universe for "ensemble"/"mean_reversion_scalp" modes.
+    - BTC/USDT:USDT           # "cross_sectional_momentum" mode ignores this and selects its own
+    - ETH/USDT:USDT           # universe dynamically - see strategy.universe_* below.
     - SOL/USDT:USDT
   timeframe: 4h               # execution timeframe
   trend_timeframe: 1d         # higher timeframe trend filter
@@ -35,18 +35,32 @@ indicators:
   rsi_fast_overbought: 90
 
 strategy:
-  mode: ensemble               # "ensemble" (trend/breakout + regime-gated mean-reversion) | "mean_reversion_scalp"
+  mode: cross_sectional_momentum  # "ensemble" | "mean_reversion_scalp" | "cross_sectional_momentum"
+  # cross_sectional_momentum only. lookback/min_score below were set by
+  # walk-forward optimization (most-reselected across folds); see README.
+  momentum_lookback_bars: 20   # bars back to measure momentum over
+  top_k: 3                     # go long the N strongest-momentum symbols
+  bottom_k: 3                  # go short the N weakest (0 to disable shorting)
+  min_abs_momentum_score: 1.0  # skip a slot if even the best/worst ranked score is this weak
+  universe_top_n: 15           # trade the top N most liquid eligible perpetuals
+  universe_min_quote_volume_24h: 5000000  # floor: skip anything thinner than this in 24h quote volume
+  universe_refresh_hours: 24   # how often the live/paper bot re-scans for the current liquid universe
 
 risk:
-  starting_equity: 10000.0    # only used by paper broker / backtester
-  risk_per_trade_pct: 1.0     # % of equity risked per trade (stop distance)
-  max_leverage: 5
-  atr_stop_multiplier: 2.0    # stop = entry -/+ atr_stop_multiplier * ATR
-  take_profit_r_multiple: 2.0 # take profit at this multiple of initial risk (R) - set by walk-forward optimization, see README
+  # starting_equity is in USDT (Bitget's quote currency), not EUR - ~200 EUR
+  # is ~215 USDT, but set it to your actual deposit. In LIVE mode this is only
+  # a bootstrap value: the bot syncs real equity from the exchange each cycle,
+  # so a monthly top-up is picked up automatically without editing this file.
+  # In paper/backtest it's the simulated starting balance.
+  starting_equity: 200.0
+  risk_per_trade_pct: 1.0     # % of equity risked per trade. 1% of 200 = ~$2/trade - deliberately not raised for a small account; a bigger % just blows up faster.
+  max_leverage: 3             # hard cap on any single position's notional / equity. NOT raised for the small account - leverage is how small accounts die, not how they grow.
+  atr_stop_multiplier: 3.0    # stop = entry -/+ atr_stop_multiplier * ATR (widened by walk-forward opt for cross_sectional_momentum - fewer premature stop-outs)
+  take_profit_r_multiple: 2.0 # take profit at this multiple of initial risk (R). Ignored by cross_sectional_momentum, which exits on rank, not a fixed target.
   trailing_activation_r: 1.0  # start trailing once trade is up this many R
   trailing_atr_multiplier: 1.5
-  max_concurrent_positions: 3
-  max_portfolio_risk_pct: 3.0 # sum of open-trade risk, as % of equity
+  max_concurrent_positions: 6 # cross_sectional_momentum holds up to top_k + bottom_k names; sized to match.
+  max_portfolio_risk_pct: 6.0 # sum of open-trade risk across all positions, as % of equity (6 positions x 1% each).
   max_daily_loss_pct: 3.0     # halt new trades for the day past this loss
   max_drawdown_pct: 15.0      # halt bot entirely past this drawdown from peak equity
 

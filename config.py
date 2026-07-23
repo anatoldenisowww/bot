@@ -47,7 +47,15 @@ class IndicatorConfig:
 
 @dataclass
 class StrategyConfig:
-    mode: str  # "ensemble" (regime-routed trend/breakout/mean-reversion) | "mean_reversion_scalp"
+    mode: str  # "ensemble" | "mean_reversion_scalp" | "cross_sectional_momentum"
+    # cross_sectional_momentum knobs (ignored by the other two modes):
+    momentum_lookback_bars: int
+    top_k: int
+    bottom_k: int
+    min_abs_momentum_score: float
+    universe_top_n: int
+    universe_min_quote_volume_24h: float
+    universe_refresh_hours: int
 
 
 @dataclass
