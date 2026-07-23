@@ -67,7 +67,21 @@ def _check_exit(position: Position, bar: pd.Series, cfg: Config) -> Tuple[float,
 
 
 def warmup_bars(cfg: Config) -> int:
-    return max(cfg.indicators.ema_trend_filter, cfg.indicators.adx_period, cfg.indicators.bb_period) + 5
+    """Bars to skip before trading so every indicator the ACTIVE strategy uses
+    is warmed up. Strategy-aware on purpose: the ensemble leans on a 200-bar
+    trend EMA, but cross_sectional_momentum never touches it and only needs
+    its momentum lookback + ATR. Charging every strategy the ensemble's
+    200-bar warmup wasted ~200 of only ~700 bars on the daily timeframe."""
+    ind = cfg.indicators
+    if cfg.strategy.mode == "cross_sectional_momentum":
+        needed = max(cfg.strategy.momentum_lookback_bars, ind.atr_period, ind.bb_period)
+        # allow for the whole optimizer lookback grid, so warmup is stable
+        # regardless of which lookback a given fold selects
+        needed = max(needed, 90)
+        return needed + 5
+    if cfg.strategy.mode == "mean_reversion_scalp":
+        return max(ind.bb_period, ind.rsi_fast_period, ind.atr_period, ind.adx_period) + 5
+    return max(ind.ema_trend_filter, ind.adx_period, ind.bb_period) + 5
 
 
 def align_on_common_timestamps(dfs: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:

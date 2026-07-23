@@ -205,11 +205,24 @@ Every number below is **chained out-of-sample** (walk-forward, ~400 days,
 300d/100d folds) on real Bitget data, net of 0.06% taker fees + 0.05%
 assumed slippage per fill. Run date 2026-07-23.
 
-| Strategy | Universe | OOS return | Sharpe | Profit factor | Max DD | Win rate | Trades |
+| Strategy | Universe / TF | OOS return | Sharpe | Profit factor | Max DD | Win rate | Trades |
 |---|---|---|---|---|---|---|---|
-| **cross_sectional_momentum** (default) | 10 liquid perps | **-0.34%** | 0.01 | **1.07** | **10.4%** | 37% | 265 |
-| ensemble | BTC/ETH/SOL | +1.64% | 0.20 | 1.08 | 19.6% | 45% | 127 |
-| mean_reversion_scalp | BTC/ETH/SOL | -2.83% | -0.06 | 1.03 | ~20% | 44% | ~130 |
+| **cross_sectional_momentum** (default) | 10 liquid perps, 4h | **-0.34%** | 0.01 | **1.07** | **10.4%** | 37% | 265 |
+| cross_sectional_momentum | 9 perps, **1d** | -1.35% | -0.49 | 0.73 | **4.3%** | 45% | **31** |
+| ensemble | BTC/ETH/SOL, 4h | +1.64% | 0.20 | 1.08 | 19.6% | 45% | 127 |
+| mean_reversion_scalp | BTC/ETH/SOL, 4h | -2.83% | -0.06 | 1.03 | ~20% | 44% | ~130 |
+
+The 1d row was the theory-driven attempt to find real profit (momentum is
+more robust at longer horizons, and 31 trades instead of 265 slashes cost
+drag). It worked on cost and risk - drawdown fell to 4.3% - but still didn't
+turn net-positive on this sample. That's the honest result: **no directional
+configuration tested here shows a reliable net-of-cost edge.** The one that's
+marginally positive (ensemble, +1.64%) is on 3 correlated coins and is well
+within noise. This matches reality - persistent directional alpha, net of
+costs, is genuinely hard for a retail account, and the intellectually honest
+next step is a market-neutral **funding-rate carry** strategy (harvesting the
+perpetual funding cash flow rather than predicting direction), which is a
+different kind of edge entirely - not yet built here.
 
 **How to read this honestly:**
 
