@@ -64,13 +64,36 @@ def _check_exit(position: Position, bar: pd.Series, cfg: Config) -> Tuple[float,
     return None, None
 
 
+def warmup_bars(cfg: Config) -> int:
+    return max(cfg.indicators.ema_trend_filter, cfg.indicators.adx_period, cfg.indicators.bb_period) + 5
+
+
 def run_backtest(cfg: Config, price_data: Dict[str, pd.DataFrame]) -> BacktestResult:
+    """Compute indicators fresh and backtest the full available range.
+
+    For repeated backtests over the same price history with different risk/
+    regime parameters (e.g. walk-forward optimization), prefer computing the
+    indicator DataFrames once with `indicators.add_all_indicators` and calling
+    `simulate()` directly - it's the same event loop without redundant
+    indicator recomputation, which dominates the cost of a grid search.
+    """
     dfs = {sym: indicators.add_all_indicators(df, cfg.indicators) for sym, df in price_data.items()}
     min_len = min(len(df) for df in dfs.values())
-    warmup = max(cfg.indicators.ema_trend_filter, cfg.indicators.adx_period, cfg.indicators.bb_period) + 5
+    warmup = warmup_bars(cfg)
     if min_len <= warmup:
         raise ValueError(f"not enough candles ({min_len}) to warm up indicators (need > {warmup})")
+    return simulate(cfg, dfs, warmup, min_len)
 
+
+def simulate(cfg: Config, dfs: Dict[str, pd.DataFrame], start_index: int, end_index: int) -> BacktestResult:
+    """Core event loop over precomputed indicator DataFrames, trading only
+    bars in [start_index, end_index). Bars before start_index are still
+    visible to the strategy (needed for indicator lookback / regime context)
+    but no entries or exits happen there - this is what lets a walk-forward
+    optimizer hand in the same full-history DataFrame for every fold and just
+    move the window, without recomputing indicators per fold or per candidate
+    parameter set.
+    """
     strategy = EnsembleStrategy(cfg.indicators)
     risk = RiskManager(cfg.risk)
     portfolio = PortfolioManager(starting_equity=cfg.risk.starting_equity)
@@ -81,7 +104,7 @@ def run_backtest(cfg: Config, price_data: Dict[str, pd.DataFrame]) -> BacktestRe
 
     timeline = dfs[next(iter(dfs))]["timestamp"]
 
-    for i in range(warmup, min_len):
+    for i in range(start_index, end_index):
         ts = timeline.iloc[i]
         portfolio.advance_clock(ts.to_pydatetime())
         current_prices = {sym: dfs[sym].iloc[i]["close"] for sym in dfs}
@@ -139,7 +162,7 @@ def run_backtest(cfg: Config, price_data: Dict[str, pd.DataFrame]) -> BacktestRe
         equity_curve.append((ts, portfolio.mark_to_market_equity(current_prices)))
 
     # close anything still open at the end, mark-to-market, for a clean final number
-    final_prices = {sym: dfs[sym].iloc[min_len - 1]["close"] for sym in dfs}
+    final_prices = {sym: dfs[sym].iloc[end_index - 1]["close"] for sym in dfs}
     for sym in list(portfolio.open_positions.keys()):
         price = final_prices[sym]
         fee = price * portfolio.open_positions[sym].qty * fee_rate
@@ -164,8 +187,7 @@ def _compute_stats(cfg: Config, portfolio: PortfolioManager, equity_curve: List[
 
         returns = np.diff(equities) / equities[:-1]
         if len(returns) > 1 and returns.std() > 0:
-            periods_per_year = _periods_per_year(cfg.exchange.timeframe)
-            sharpe = float(returns.mean() / returns.std() * np.sqrt(periods_per_year))
+            sharpe = float(returns.mean() / returns.std() * np.sqrt(periods_per_year(cfg.exchange.timeframe)))
         else:
             sharpe = 0.0
     else:
@@ -194,7 +216,7 @@ def _compute_stats(cfg: Config, portfolio: PortfolioManager, equity_curve: List[
     )
 
 
-def _periods_per_year(timeframe: str) -> float:
+def periods_per_year(timeframe: str) -> float:
     unit = timeframe[-1]
     value = int(timeframe[:-1])
     minutes_per_period = {"m": value, "h": value * 60, "d": value * 60 * 24}.get(unit)

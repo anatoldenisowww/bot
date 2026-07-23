@@ -28,7 +28,7 @@ indicators:
   bb_std: 2.0
   atr_period: 14
   adx_period: 14
-  adx_trend_threshold: 25     # ADX above this = trending regime
+  adx_trend_threshold: 20     # ADX above this = trending regime - set by walk-forward optimization, see README
   donchian_period: 20
 
 risk:
@@ -36,7 +36,7 @@ risk:
   risk_per_trade_pct: 1.0     # % of equity risked per trade (stop distance)
   max_leverage: 5
   atr_stop_multiplier: 2.0    # stop = entry -/+ atr_stop_multiplier * ATR
-  take_profit_r_multiple: 2.5 # take profit at this multiple of initial risk (R)
+  take_profit_r_multiple: 2.0 # take profit at this multiple of initial risk (R) - set by walk-forward optimization, see README
   trailing_activation_r: 1.0  # start trailing once trade is up this many R
   trailing_atr_multiplier: 1.5
   max_concurrent_positions: 3
