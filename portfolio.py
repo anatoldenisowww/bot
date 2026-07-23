@@ -23,14 +23,24 @@ class PortfolioManager:
 
         self._daily_start_equity = starting_equity
         self._daily_start_date = utcnow().date()
+        # None -> use real wall-clock time (live/paper trading). The backtester
+        # calls advance_clock() with each simulated bar's timestamp instead, so
+        # the daily-loss window rolls over on simulated days, not real ones.
+        self._clock: Optional[datetime] = None
 
         self.state_file = state_file
         self.trade_log_file = trade_log_file
 
+    def advance_clock(self, ts: datetime) -> None:
+        self._clock = ts
+
+    def _now(self) -> datetime:
+        return self._clock if self._clock is not None else utcnow()
+
     # ---- daily window ---------------------------------------------------
 
     def _roll_daily_window_if_needed(self) -> None:
-        today = utcnow().date()
+        today = self._now().date()
         if today != self._daily_start_date:
             self._daily_start_date = today
             self._daily_start_equity = self.equity

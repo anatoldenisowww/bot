@@ -83,6 +83,7 @@ def run_backtest(cfg: Config, price_data: Dict[str, pd.DataFrame]) -> BacktestRe
 
     for i in range(warmup, min_len):
         ts = timeline.iloc[i]
+        portfolio.advance_clock(ts.to_pydatetime())
         current_prices = {sym: dfs[sym].iloc[i]["close"] for sym in dfs}
 
         # 1. manage existing positions: stop/take-profit, then trailing stop.

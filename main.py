@@ -27,6 +27,9 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     cfg = load_config()
     setup_logging(cfg.runtime.log_dir)
 
+    if args.timeframe:
+        cfg.exchange.timeframe = args.timeframe
+
     feed = MarketDataFeed(cfg)
     since_ms = int((datetime.now(timezone.utc) - timedelta(days=args.days)).timestamp() * 1000)
 
@@ -122,6 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     bt = sub.add_parser("backtest", help="backtest the strategy against historical Bitget data")
     bt.add_argument("--days", type=int, default=365, help="how many days of history to fetch")
+    bt.add_argument("--timeframe", type=str, default=None, help="override the execution timeframe from settings.yaml, e.g. 1h")
     bt.add_argument("--save-trades", type=str, default=None, help="optional path to save closed trades as JSONL")
     bt.set_defaults(func=cmd_backtest)
 

@@ -78,6 +78,7 @@ class MarketDataFeed:
         cursor = since_ms
         now_ms = self.client.milliseconds()
 
+        stall_count = 0
         while cursor < now_ms:
             batch = self.client.fetch_ohlcv(symbol, timeframe=timeframe, since=cursor, limit=page_limit)
             if not batch:
@@ -85,10 +86,17 @@ class MarketDataFeed:
             all_rows.extend(batch)
             last_ts = batch[-1][0]
             if last_ts <= cursor:
-                break
-            cursor = last_ts + 1
-            if len(batch) < page_limit:
-                break
+                # Some venues/timeframes occasionally return a page that doesn't
+                # advance the cursor (e.g. a short page ending exactly on a
+                # boundary). Don't treat that alone as "no more data" - only
+                # bail out once it happens repeatedly, to avoid an infinite loop.
+                stall_count += 1
+                if stall_count >= 3:
+                    break
+                cursor += 1
+            else:
+                stall_count = 0
+                cursor = last_ts + 1
             time.sleep(self.client.rateLimit / 1000.0)
 
         if not all_rows:
