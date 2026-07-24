@@ -109,10 +109,12 @@ portfolio.py         equity/positions/drawdown tracking, trade log, state persis
 exchange.py          ccxt Bitget wrapper: market data, universe fetch, order-size limits, PaperBroker, LiveBroker
 backtester.py         event-driven historical replay with fees + slippage + exchange min-order-size handling
 optimize.py            walk-forward parameter search (train on the past, validate strictly out-of-sample)
-regime_hmm.py          Hidden Markov Model market-regime detector (an analysis tool, not a trade signal)
-regime_report.py       self-contained, theme-aware HTML dashboard for the HMM regime report
+regime_hmm.py          Hidden Markov Model market-regime detector (moods + BUY/HOLD/SELL leans; analysis tool)
+regime_report.py       colorful, theme-aware multi-symbol HTML dashboard for the HMM regime read
+statarb.py             pairs-trading statistical-arbitrage screener (hedge ratio, half-life, z-score, backtest)
+statarb_report.py      colorful, theme-aware HTML dashboard for the pairs screener
 bot.py                 live/paper trading loop with dynamic universe refresh + live balance sync
-main.py                 CLI: backtest / optimize / regime / run --mode paper|live
+main.py                 CLI: backtest / optimize / regime / pairs / run --mode paper|live
 settings.yaml            strategy & risk parameters (safe to edit freely)
 .env.example              API credential template (copy to .env, never commit .env)
 tests/                     pytest suite (indicators, risk, portfolio, strategies, universe, sizing, backtester, optimizer)
@@ -157,6 +159,27 @@ dashboard you can open in any browser. **What it is not:** a price predictor
 or a profit guarantee - an HMM describes the current statistical state and
 historical dynamics; it cannot tell you tomorrow's return. Useful as context
 (e.g. "high-volatility regime -> size down"), not as a buy/sell trigger.
+
+**Pairs-trading screener (statistical arbitrage)** - screens which crypto
+pairs are actually worth pairs-trading. For each pair it fits a hedge ratio,
+measures how fast the spread mean-reverts (half-life), shows where the spread
+sits now (z-score) and the current signal, and backtests fading the extremes
+net of costs on all four legs:
+
+```bash
+python main.py pairs --symbols BTC/USDT:USDT ETH/USDT:USDT SOL/USDT:USDT
+python main.py pairs --days 700 --html pairs.html    # + a colorful dashboard
+```
+
+Honest result on BTC/ETH/SOL: they're highly correlated but their spreads
+have a **half-life of ~500 bars (~3 months)** - they trend together and don't
+mean-revert fast enough to trade, and the backtests are negative. The tool
+correctly flags them "not a good pair right now" (verified against a
+synthetic mean-reverting pair, where it finds a short half-life and a
+positive edge). Point it at other symbols/timeframes to screen for pairs that
+actually revert. **Stat arb is not pure arbitrage:** no guaranteed
+convergence, individual trades lose, relationships break - hence the hard
+z-score stop.
 
 **Paper trade** (default, no API keys required) - runs continuously against
 live market data with simulated fills:

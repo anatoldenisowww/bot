@@ -322,6 +322,65 @@ def cmd_regime(args: argparse.Namespace) -> None:
         print(f"Wrote colorful HTML dashboard ({len(reports)} symbols) to {args.html}")
 
 
+def cmd_pairs(args: argparse.Namespace) -> None:
+    from statarb import PairConfig, analyze_pair, all_pairs
+
+    cfg = load_config()
+    setup_logging(cfg.runtime.log_dir)
+    timeframe = args.timeframe or cfg.exchange.timeframe
+    feed = MarketDataFeed(cfg)
+
+    since_ms = int((datetime.now(timezone.utc) - timedelta(days=args.days)).timestamp() * 1000)
+    data = {}
+    for sym in args.symbols:
+        logger.info("fetching %s %s history for pairs analysis", sym, timeframe)
+        df = feed.fetch_ohlcv_since(sym, timeframe, since_ms)
+        if not df.empty:
+            data[sym] = df
+
+    pairs = [(a, b) for a, b in all_pairs(args.symbols) if a in data and b in data]
+    if not pairs:
+        print("Not enough symbols with data to form a pair - aborting.")
+        sys.exit(1)
+
+    pair_cfg = PairConfig(entry_z=args.entry_z, exit_z=args.exit_z, stop_z=args.stop_z, zscore_window=args.window)
+    reports = []
+    for a, b in pairs:
+        try:
+            reports.append(analyze_pair(data[a], data[b], a, b, pair_cfg))
+        except ValueError as exc:
+            print(f"skip {a}/{b}: {exc}")
+
+    print(f"\n=== Pairs-trading screener ({timeframe}, {args.days}d) ===")
+    print("'reverts in' = spread half-life (lower = mean-reverts faster = more tradeable).")
+    print("A very long half-life means the coins trend together and the spread does NOT revert.\n")
+    rows = []
+    for r in reports:
+        s, bt = r.stats, r.backtest
+        hl = "inf" if s.half_life_bars == float("inf") else f"{s.half_life_bars:.0f}"
+        pf = "inf" if bt.profit_factor == float("inf") else f"{bt.profit_factor:.2f}"
+        rows.append([
+            f"{s.symbol_a.split('/')[0]}-{s.symbol_b.split('/')[0]}",
+            f"{s.correlation:.2f}", f"{hl}b", f"{s.current_z:+.2f}", s.current_signal,
+            f"{bt.total_return_pct:+.1f}%", pf, f"{bt.win_rate:.0f}%", f"{bt.max_drawdown_pct:.0f}%",
+        ])
+    print(tabulate(
+        rows,
+        headers=["pair", "corr", "reverts in", "z now", "signal", "bt return", "PF", "win%", "maxDD"],
+        tablefmt="simple",
+    ))
+    print(
+        "\nStat arb is NOT pure arbitrage: no guaranteed convergence, individual trades lose, relationships "
+        "break. Costs hit 4 legs per round trip. Validate out-of-sample before trusting any of this.\n"
+    )
+
+    if args.html:
+        from statarb_report import render_statarb_html
+        with open(args.html, "w") as f:
+            f.write(render_statarb_html(reports, pair_cfg, timeframe))
+        print(f"Wrote colorful pairs dashboard to {args.html}")
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     cfg = load_config()
     setup_logging(cfg.runtime.log_dir)
@@ -388,6 +447,18 @@ def build_parser() -> argparse.ArgumentParser:
     reg.add_argument("--bars", type=int, default=1000, help="how many recent candles to fit on")
     reg.add_argument("--html", type=str, default=None, help="optional path to write a colorful HTML dashboard")
     reg.set_defaults(func=cmd_regime)
+
+    pr = sub.add_parser("pairs", help="statistical-arbitrage screener: which crypto pairs are worth pairs-trading")
+    pr.add_argument("--symbols", nargs="+", default=["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"],
+                    help="symbols to form pairs from (default: BTC ETH SOL)")
+    pr.add_argument("--timeframe", type=str, default=None, help="candle timeframe (defaults to settings.yaml)")
+    pr.add_argument("--days", type=int, default=700, help="how many days of history to analyze")
+    pr.add_argument("--window", type=int, default=60, help="rolling window (bars) for the spread z-score")
+    pr.add_argument("--entry-z", type=float, default=2.0, help="open a trade when |z| exceeds this")
+    pr.add_argument("--exit-z", type=float, default=0.5, help="close when |z| falls back inside this")
+    pr.add_argument("--stop-z", type=float, default=4.0, help="bail out if |z| blows past this (relationship broke)")
+    pr.add_argument("--html", type=str, default=None, help="optional path to write a colorful HTML dashboard")
+    pr.set_defaults(func=cmd_pairs)
 
     run = sub.add_parser("run", help="run the bot continuously")
     run.add_argument("--mode", choices=["paper", "live"], default="paper")
