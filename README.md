@@ -109,8 +109,10 @@ portfolio.py         equity/positions/drawdown tracking, trade log, state persis
 exchange.py          ccxt Bitget wrapper: market data, universe fetch, order-size limits, PaperBroker, LiveBroker
 backtester.py         event-driven historical replay with fees + slippage + exchange min-order-size handling
 optimize.py            walk-forward parameter search (train on the past, validate strictly out-of-sample)
+regime_hmm.py          Hidden Markov Model market-regime detector (an analysis tool, not a trade signal)
+regime_report.py       self-contained, theme-aware HTML dashboard for the HMM regime report
 bot.py                 live/paper trading loop with dynamic universe refresh + live balance sync
-main.py                 CLI: backtest / optimize / run --mode paper|live
+main.py                 CLI: backtest / optimize / regime / run --mode paper|live
 settings.yaml            strategy & risk parameters (safe to edit freely)
 .env.example              API credential template (copy to .env, never commit .env)
 tests/                     pytest suite (indicators, risk, portfolio, strategies, universe, sizing, backtester, optimizer)
@@ -136,6 +138,25 @@ python main.py backtest --days 365                                    # default 
 python main.py backtest --days 700 --strategy-mode ensemble           # try another strategy
 python main.py backtest --days 365 --save-trades trades.jsonl         # dump every trade to inspect
 ```
+
+**Market-regime detector (Hidden Markov Model)** - an information tool, not a
+trade signal. Fits a Gaussian HMM to log-returns + rolling volatility and
+tells you which hidden regime (e.g. calm bull, choppy range, volatile
+selloff) the market is most likely in now, how those regimes behave, and how
+they transition:
+
+```bash
+python main.py regime --symbol BTC/USDT:USDT --timeframe 4h --states 3
+python main.py regime --symbol ETH/USDT:USDT --html regime_eth.html   # + a visual dashboard
+```
+
+It prints a table of regimes (mean return, volatility, how often, how long
+they last), the current regime with confidence, and the transition-
+probability matrix. `--html` also writes a self-contained, theme-aware
+dashboard you can open in any browser. **What it is not:** a price predictor
+or a profit guarantee - an HMM describes the current statistical state and
+historical dynamics; it cannot tell you tomorrow's return. Useful as context
+(e.g. "high-volatility regime -> size down"), not as a buy/sell trigger.
 
 **Paper trade** (default, no API keys required) - runs continuously against
 live market data with simulated fills:

@@ -260,6 +260,56 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         print(f"Saved {len(result.folds)} fold summaries to {args.save_folds}")
 
 
+def cmd_regime(args: argparse.Namespace) -> None:
+    from regime_hmm import fit_regimes
+
+    cfg = load_config()
+    setup_logging(cfg.runtime.log_dir)
+    timeframe = args.timeframe or cfg.exchange.timeframe
+
+    feed = MarketDataFeed(cfg)
+    logger.info("fetching %s %s history for HMM regime detection", args.symbol, timeframe)
+    df = feed.fetch_ohlcv(args.symbol, timeframe, limit=args.bars)
+    if len(df) < 60:
+        print(f"Not enough data for {args.symbol} ({len(df)} bars) - try a larger --bars or different symbol.")
+        sys.exit(1)
+
+    report = fit_regimes(df, n_states=args.states, timeframe=timeframe, symbol=args.symbol)
+
+    print(f"\n=== HMM market regimes: {args.symbol} {timeframe} ({len(df)} bars) ===")
+    print(tabulate(
+        [
+            [s.index, s.label, f"{s.mean_return_pct:+.3f}%", f"{s.volatility_pct:.3f}%",
+             f"{s.frequency_pct:.0f}%",
+             ("inf" if s.expected_duration_bars == float("inf") else f"{s.expected_duration_bars:.1f}")]
+            for s in report.states
+        ],
+        headers=["state", "character", "mean/bar", "volatility", "time in", "avg duration (bars)"],
+        tablefmt="simple",
+    ))
+    print(f"\nCurrent regime: state {report.current_state} - {report.current.label}")
+    print("  confidence: " + " · ".join(f"S{i} {p*100:.0f}%" for i, p in enumerate(report.current_state_probs)))
+    print(f"  most likely next regime: {report.expected_next_state().label}")
+    print("\nTransition matrix P(next | current), rows=from state, cols=to state:")
+    print(tabulate(
+        [[f"from {i}"] + [f"{report.transition_matrix[i][j]:.2f}" for j in range(report.n_states)]
+         for i in range(report.n_states)],
+        headers=[""] + [f"to {j}" for j in range(report.n_states)],
+        tablefmt="simple",
+    ))
+    print(
+        "\nThis is an information tool: it describes the market's current statistical regime and the "
+        "historical dynamics between regimes. It does NOT predict future prices or guarantee profit.\n"
+    )
+
+    if args.html:
+        from regime_report import render_regime_html
+        html_body = render_regime_html(report)
+        with open(args.html, "w") as f:
+            f.write(html_body)
+        print(f"Wrote HTML regime dashboard to {args.html}")
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     cfg = load_config()
     setup_logging(cfg.runtime.log_dir)
@@ -317,6 +367,14 @@ def build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--min-win-rate", type=float, default=0.0, help="optional training win-rate floor (%%). Off by default; we've shown it tends to reduce profitability")
     opt.add_argument("--save-folds", type=str, default=None, help="optional path to save per-fold summaries as JSONL")
     opt.set_defaults(func=cmd_optimize)
+
+    reg = sub.add_parser("regime", help="fit a Hidden Markov Model and report the market's current regime")
+    reg.add_argument("--symbol", type=str, default="BTC/USDT:USDT", help="symbol to analyze")
+    reg.add_argument("--timeframe", type=str, default=None, help="candle timeframe (defaults to settings.yaml)")
+    reg.add_argument("--states", type=int, default=3, help="number of hidden regimes to fit (2-4 is typical)")
+    reg.add_argument("--bars", type=int, default=1000, help="how many recent candles to fit on")
+    reg.add_argument("--html", type=str, default=None, help="optional path to write a visual HTML dashboard")
+    reg.set_defaults(func=cmd_regime)
 
     run = sub.add_parser("run", help="run the bot continuously")
     run.add_argument("--mode", choices=["paper", "live"], default="paper")
