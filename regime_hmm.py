@@ -44,6 +44,8 @@ class RegimeState:
     volatility_pct: float      # per-bar return std dev, %
     frequency_pct: float       # % of history spent in this state
     expected_duration_bars: float  # 1 / (1 - self-transition prob)
+    lean: str = ""             # plain-language historical lean: "BUY" | "HOLD" | "SELL"
+    plain: str = ""            # one-sentence plain-English description of how this regime behaved
 
 
 @dataclass
@@ -79,6 +81,36 @@ def _label_state(mean_return_pct: float, volatility_pct: float, vol_median: floa
     if mean_return_pct < -0.05:
         return "volatile selloff" if hi_vol else "grinding decline"
     return "choppy range (high vol)" if hi_vol else "quiet range"
+
+
+def _lean_and_plain(mean_return_pct: float, volatility_pct: float, vol_median: float) -> tuple:
+    """Translate a regime's HISTORICAL statistics into a plain-language lean.
+
+    This is descriptive, not predictive: it says how price behaved *while the
+    market was in this regime in the past*, phrased as the buy/hold/sell tilt
+    that behavior would have rewarded. It is NOT financial advice and NOT a
+    guarantee - regimes flip without warning, and detecting the current regime
+    has lag. Treat it as context ("what kind of weather is this?"), not a
+    signal to act on blindly.
+    """
+    hi_vol = volatility_pct >= vol_median
+    if mean_return_pct > 0.05:
+        if hi_vol:
+            return "BUY", ("Prices rose on average here, but in big swings. Historically a "
+                           "buy/accumulate environment - just size smaller because it's choppy.")
+        return "BUY", ("Prices drifted up steadily with low volatility. Historically the calmest, "
+                       "friendliest environment to buy or hold.")
+    if mean_return_pct < -0.05:
+        if hi_vol:
+            return "SELL", ("Prices fell on average, in violent moves. Historically the riskiest "
+                            "environment - favored reducing exposure or standing aside, not buying dips.")
+        return "SELL", ("Prices ground lower. Historically a weak, defensive environment - "
+                        "leaned toward reducing rather than adding.")
+    if hi_vol:
+        return "HOLD", ("Prices went roughly sideways but with large swings. Historically a chop "
+                        "zone where trend trades whipsaw - leaned toward waiting, not chasing.")
+    return "HOLD", ("Prices went quietly sideways. Historically a calm, directionless pause - "
+                    "leaned toward holding and waiting for a clearer regime.")
 
 
 def fit_regimes(
@@ -150,6 +182,7 @@ def fit_regimes(
         freq = float(mask.mean() * 100)
         self_p = float(trans[new_s, new_s])
         expected_dur = 1.0 / (1.0 - self_p) if self_p < 1.0 else float("inf")
+        lean, plain = _lean_and_plain(means_pct[new_s], vols_pct[new_s], vol_median)
         states.append(RegimeState(
             index=new_s,
             label=_label_state(means_pct[new_s], vols_pct[new_s], vol_median),
@@ -157,6 +190,8 @@ def fit_regimes(
             volatility_pct=vols_pct[new_s],
             frequency_pct=freq,
             expected_duration_bars=expected_dur,
+            lean=lean,
+            plain=plain,
         ))
 
     current_state = int(relabeled_seq[-1])

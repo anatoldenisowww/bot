@@ -48,15 +48,39 @@ def test_fit_regimes_frequencies_sum_to_100():
     assert abs(total_freq - 100.0) < 1.0  # rounding tolerance
 
 
-def test_render_regime_html_is_self_contained():
+def test_states_carry_buy_hold_sell_lean():
+    df = _two_regime_series()
+    report = fit_regimes(df, n_states=3, timeframe="4h", symbol="TEST/USDT:USDT")
+    for s in report.states:
+        assert s.lean in {"BUY", "HOLD", "SELL"}
+        assert s.plain  # non-empty plain-language description
+    # ordering is bearish-first, so the most bearish state should not lean BUY
+    assert report.states[0].lean in {"SELL", "HOLD"}
+    assert report.states[-1].lean in {"BUY", "HOLD"}
+
+
+def test_render_regime_html_is_self_contained_and_colorful():
     df = _two_regime_series()
     report = fit_regimes(df, n_states=3, timeframe="4h", symbol="TEST/USDT:USDT")
     doc = render_regime_html(report)
     body = render_regime_body(report)
-    assert "<svg" in body and "Transition probabilities" in body
+    assert "<svg" in body and "How moods change" in body
+    # colorful lean pills present
+    assert "pill-buy" in body or "pill-sell" in body or "pill-hold" in body
     # self-contained: no external resource references, no scripts, both themes styled
     assert "http://" not in doc and "https://" not in doc
     assert "<script" not in doc
     assert 'data-theme="dark"' in body and "prefers-color-scheme: dark" in body
-    # full document is well-formed enough to open standalone
     assert doc.strip().startswith("<!doctype html>") and doc.strip().endswith("</html>")
+
+
+def test_render_multi_regime_html_stacks_symbols():
+    from regime_report import render_multi_regime_html
+    df = _two_regime_series()
+    reports = [
+        fit_regimes(df, n_states=3, timeframe="4h", symbol="BTC/USDT:USDT"),
+        fit_regimes(df, n_states=3, timeframe="4h", symbol="ETH/USDT:USDT"),
+    ]
+    doc = render_multi_regime_html(reports)
+    assert "BTC/USDT:USDT" in doc and "ETH/USDT:USDT" in doc
+    assert doc.count("<section") >= 2
