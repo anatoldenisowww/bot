@@ -381,6 +381,58 @@ def cmd_pairs(args: argparse.Namespace) -> None:
         print(f"Wrote colorful pairs dashboard to {args.html}")
 
 
+def cmd_carry(args: argparse.Namespace) -> None:
+    from funding_carry import CarryConfig, backtest_carry, screen
+
+    cfg = load_config()
+    setup_logging(cfg.runtime.log_dir)
+    feed = MarketDataFeed(cfg)
+
+    symbols = args.symbols
+    if args.scan_top:
+        symbols = feed.fetch_liquid_universe(args.scan_top, cfg.strategy.universe_min_quote_volume_24h)
+        print(f"Scanning the {len(symbols)} most liquid perps for persistent positive funding...\n")
+
+    carry_cfg = CarryConfig(hold=args.hold)
+    reports = []
+    for sym in symbols:
+        logger.info("fetching funding history for %s", sym)
+        try:
+            fh = feed.fetch_funding_history(sym, days=args.days)
+            reports.append(backtest_carry(fh, carry_cfg, symbol=sym))
+        except ValueError as exc:
+            print(f"skip {sym}: {exc}")
+
+    if not reports:
+        print("No symbols had enough funding history - aborting.")
+        sys.exit(1)
+
+    ordered = screen(reports)
+    print("=== Funding-carry screener (cash-and-carry: long spot + short perp, delta-neutral) ===")
+    print("'persistence' = % of intervals funding was positive (the edge). 'carry/yr' held long-term.\n")
+    print(tabulate(
+        [
+            [r.stats.symbol.split("/")[0], f"{r.stats.days_covered:.0f}d", f"{r.stats.persistence_pct:.0f}%",
+             f"{r.stats.sustainable_annual_pct:+.1f}%", f"{r.stats.one_time_cost_pct:.2f}%",
+             "yes" if r.stats.worth_it else "no"]
+            for r in ordered
+        ],
+        headers=["coin", "sample", "persistence", "carry/yr", "1x cost", "worth it"],
+        tablefmt="simple",
+    ))
+    print(
+        "\nHONEST READ: this is the one real, structural edge here - but it's modest (single-digit %/yr) and\n"
+        "market-neutral 'rent', not a jackpot. Funding can flip negative (already counted). Needs a spot AND a\n"
+        "perp leg. Sample is only ~33 days (Bitget's limit), so treat annualized figures as indicative.\n"
+    )
+
+    if args.html:
+        from funding_carry_report import render_carry_html
+        with open(args.html, "w") as f:
+            f.write(render_carry_html(reports, carry_cfg))
+        print(f"Wrote colorful funding-carry dashboard to {args.html}")
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     cfg = load_config()
     setup_logging(cfg.runtime.log_dir)
@@ -459,6 +511,18 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--stop-z", type=float, default=4.0, help="bail out if |z| blows past this (relationship broke)")
     pr.add_argument("--html", type=str, default=None, help="optional path to write a colorful HTML dashboard")
     pr.set_defaults(func=cmd_pairs)
+
+    ca = sub.add_parser("carry", help="funding-rate carry screener: the one real structural edge (collect perpetual funding, delta-neutral)")
+    ca.add_argument("--symbols", nargs="+",
+                    default=["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "DOGE/USDT:USDT",
+                             "XRP/USDT:USDT", "LINK/USDT:USDT", "AVAX/USDT:USDT"],
+                    help="symbols to screen for harvestable funding")
+    ca.add_argument("--scan-top", type=int, default=0, help="instead of --symbols, scan the N most liquid perps")
+    ca.add_argument("--days", type=int, default=365, help="days of funding history to request (Bitget serves ~33)")
+    ca.add_argument("--hold", choices=["always", "positive_only"], default="always",
+                    help="'always' = hold continuously (realistic); 'positive_only' = flip out on negative funding (usually worse)")
+    ca.add_argument("--html", type=str, default=None, help="optional path to write a colorful HTML dashboard")
+    ca.set_defaults(func=cmd_carry)
 
     run = sub.add_parser("run", help="run the bot continuously")
     run.add_argument("--mode", choices=["paper", "live"], default="paper")

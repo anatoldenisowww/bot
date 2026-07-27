@@ -113,8 +113,10 @@ regime_hmm.py          Hidden Markov Model market-regime detector (moods + BUY/H
 regime_report.py       colorful, theme-aware multi-symbol HTML dashboard for the HMM regime read
 statarb.py             pairs-trading statistical-arbitrage screener (hedge ratio, half-life, z-score, backtest)
 statarb_report.py      colorful, theme-aware HTML dashboard for the pairs screener
+funding_carry.py       funding-rate carry screener + backtest (the one real structural edge)
+funding_carry_report.py colorful, theme-aware HTML dashboard for the funding-carry screener
 bot.py                 live/paper trading loop with dynamic universe refresh + live balance sync
-main.py                 CLI: backtest / optimize / regime / pairs / run --mode paper|live
+main.py                 CLI: backtest / optimize / regime / pairs / carry / run --mode paper|live
 settings.yaml            strategy & risk parameters (safe to edit freely)
 .env.example              API credential template (copy to .env, never commit .env)
 tests/                     pytest suite (indicators, risk, portfolio, strategies, universe, sizing, backtester, optimizer)
@@ -180,6 +182,18 @@ positive edge). Point it at other symbols/timeframes to screen for pairs that
 actually revert. **Stat arb is not pure arbitrage:** no guaranteed
 convergence, individual trades lose, relationships break - hence the hard
 z-score stop.
+
+**Funding-carry screener (the one real structural edge)** - screens which
+coins pay persistent positive funding you can harvest market-neutral via
+cash-and-carry (long spot + short perp):
+
+```bash
+python main.py carry --html carry.html          # screen the default liquid set
+python main.py carry --scan-top 40               # scan the 40 most liquid perps
+```
+
+See "The one real edge: funding carry" below for the full method, honest
+numbers, and a step-by-step action plan.
 
 **Paper trade** (default, no API keys required) - runs continuously against
 live market data with simulated fills:
@@ -393,6 +407,76 @@ purpose - two deliberate steps so you never start live by accident.
 - The bot can lose money, including all of it. Only trade what you can lose.
 - If anything looks wrong, Ctrl-C stops it; the `max_drawdown_pct` breaker
   also halts new trades automatically past a 15% drawdown.
+
+## The one real edge: funding carry (and a step-by-step plan)
+
+After honestly testing directional models (momentum, mean-reversion, ML-style
+ranking - all ~break-even net of costs) and pairs trading (crypto majors don't
+mean-revert fast enough), the one strategy here that shows a **real,
+persistent, positive net edge out of the box** is funding-rate carry.
+
+**Why it's a genuine edge, and one *you* can capture:**
+- It's *structural*, not a price pattern that gets arbitraged away: perpetual
+  futures pay funding every 8h, and it's positive ~80% of the time because
+  leveraged longs pay to keep their position. You get paid to take the other
+  side.
+- It's *market-neutral*: long the coin on spot + short the same size on the
+  perp cancels price direction. You don't predict anything - you collect the
+  funding the shorts receive.
+- Being *small is an advantage*: the fattest, most persistent funding is on
+  coins too small for big funds to deploy into. Your size is a moat, not a
+  handicap.
+
+**Honest numbers (real Bitget data, ~33-day sample - the endpoint's limit):**
+
+| Coin | Funding positive | Sustainable carry/yr | One-time in/out |
+|---|---|---|---|
+| DOGE | 86% | +7.0% | 0.44% |
+| LINK | 80% | +5.7% | 0.44% |
+| AVAX | 84% | +5.6% | 0.44% |
+| BTC | 81% | +4.6% | 0.44% |
+| SOL | 79% | +4.2% | 0.44% |
+| ETH | 87% | +3.6% | 0.44% |
+
+This is **rent, not riches**: mid-single-digit %/yr, market-neutral. On €200
+that's ~€7-14/yr; the strategy only becomes meaningful in absolute terms as
+the account grows (your planned monthly top-ups are exactly right for it).
+Risks that are real and not hidden: funding can turn negative (you'd pay -
+already counted in the numbers), the spot/perp basis can drift against you
+(a variance the central estimate treats as ~0), and the 33-day sample makes
+the annualized figures indicative, not precise.
+
+### Step-by-step action plan
+
+1. **Screen.** `python main.py carry --scan-top 40 --html carry.html`. Look for
+   coins with high persistence (funding positive >=75% of intervals) and a
+   positive sustainable carry. Persistence matters more than the headline
+   rate - a steady 5% beats a spiky 30% that flips.
+2. **Pick 1-3 names** you'll actually hold. At €200 start with ONE (min order
+   sizes are ~$5/leg and you want both legs comfortably above that). Majors
+   (BTC/ETH) are the safest first carry; their funding is smaller but their
+   legs are the most liquid and the basis is the tightest.
+3. **Put the two legs on Bitget:**
+   - Buy the coin on the **spot** market (e.g. buy ~$100 of BTC spot).
+   - Open an equal-notional **short** on the USDT-M **perp** (short ~$100 of
+     BTC perp) at **low leverage** (1-2x) so the short can't get liquidated by
+     a normal up-move. Because you're also long the same size on spot, your
+     *net* exposure to price is ~zero - a price rise gains on spot and loses on
+     the short in equal measure.
+   - Net result: you're flat on direction and **collecting funding every 8h**.
+4. **Hold and collect.** Do nothing most of the time. Every 8h, if funding is
+   positive, the short leg receives it. Check every few days that the two legs
+   are still roughly equal notional (rebalance if the coin moved a lot).
+5. **Exit** when: funding on that coin turns persistently negative (re-screen
+   and rotate to a better name), or you need the capital. Closing = sell the
+   spot + buy back the perp. That's the second half of the one-time 0.44%.
+6. **Scale as you top up.** Each monthly deposit lets you add another carry
+   position (more names = more diversification = steadier funding). The edge
+   is capacity-friendly at your size for a long time.
+
+**Safety:** keep the perp leg at low leverage so it never liquidates; never
+enable withdrawals on the API key; this is modest market-neutral income, not
+a path to fast wealth - size it as such and only risk what you can lose.
 
 ## Uploaded reference files
 

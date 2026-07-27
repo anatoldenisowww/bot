@@ -123,6 +123,52 @@ class MarketDataFeed:
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         return df
 
+    def fetch_funding_current(self, exclude_rwa: bool = True) -> Dict[str, float]:
+        """Current funding rate (per interval) for every eligible USDT-M perp."""
+        markets = self.load_markets()
+        frs = self.client.fetch_funding_rates()
+        out: Dict[str, float] = {}
+        for sym, fr in frs.items():
+            market = markets.get(sym)
+            if not market or not universe.is_eligible_perp_market(market):
+                continue
+            rate = fr.get("fundingRate")
+            if rate is not None:
+                out[sym] = float(rate)
+        return out
+
+    def fetch_funding_history(self, symbol: str, days: int) -> pd.DataFrame:
+        """Page through funding-rate history (Bitget caps ~100 records/request)
+        and return a tidy DataFrame of [timestamp, funding_rate]. Each record is
+        one funding interval (8h on Bitget for most symbols)."""
+        earliest_wanted = self.client.milliseconds() - days * 86400 * 1000
+        rates: dict = {}
+        until = self.client.milliseconds()
+        # Page BACKWARD via `until`: Bitget serves the most-recent window and
+        # ignores a far-back `since`, so we walk the endpoint backward instead.
+        # (In practice Bitget only retains ~100 recent intervals, so this
+        # usually terminates after one page - handled gracefully.)
+        for _ in range(20):
+            batch = self.client.fetch_funding_rate_history(symbol, limit=100, params={"until": until})
+            if not batch:
+                break
+            for b in batch:
+                if b.get("fundingRate") is not None:
+                    rates[b["timestamp"]] = float(b["fundingRate"])
+            oldest = min(b["timestamp"] for b in batch)
+            if oldest <= earliest_wanted or oldest >= until:
+                break
+            until = oldest - 1
+            time.sleep(self.client.rateLimit / 1000.0)
+        rows = [(ts, r) for ts, r in rates.items() if ts >= earliest_wanted]
+
+        if not rows:
+            return pd.DataFrame(columns=["timestamp", "funding_rate"])
+        df = pd.DataFrame(rows, columns=["timestamp", "funding_rate"]).drop_duplicates("timestamp")
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        return df
+
     def get_price(self, symbol: str) -> float:
         ticker = self.client.fetch_ticker(symbol)
         return float(ticker["last"])
